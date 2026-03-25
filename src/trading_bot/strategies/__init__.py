@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 
 import numpy as np
 import pandas as pd
@@ -28,6 +29,30 @@ class LTFSignal:
     atr_ratio: float
     component_scores: dict[str, float]
     reason: str | None = None
+
+
+class HTFState(str, Enum):
+    BULLISH = "bullish"
+    BEARISH = "bearish"
+    SIDEWAYS = "sideways"
+    VOLATILE = "volatile"
+
+
+@dataclass(frozen=True)
+class HTFPolicy:
+    state: HTFState
+    allow_long: bool
+    allow_short: bool
+    frequency_divisor: int
+    note: str
+
+
+@dataclass(frozen=True)
+class HTFSignal:
+    state: HTFState
+    atr_ratio: float
+    trend_score: float
+    policy: HTFPolicy
 
 
 def _validate_price_frame(df: pd.DataFrame) -> None:
@@ -173,3 +198,95 @@ def get_latest_ltf_signal(
         component_scores=component_scores,
         reason=None,
     )
+
+
+def get_htf_policy(state: HTFState | str) -> HTFPolicy:
+    normalized_state = HTFState(state)
+
+    if normalized_state is HTFState.BULLISH:
+        return HTFPolicy(
+            state=normalized_state,
+            allow_long=True,
+            allow_short=False,
+            frequency_divisor=1,
+            note="long_only",
+        )
+    if normalized_state is HTFState.BEARISH:
+        return HTFPolicy(
+            state=normalized_state,
+            allow_long=False,
+            allow_short=True,
+            frequency_divisor=1,
+            note="short_only",
+        )
+    if normalized_state is HTFState.SIDEWAYS:
+        return HTFPolicy(
+            state=normalized_state,
+            allow_long=True,
+            allow_short=True,
+            frequency_divisor=3,
+            note="reduced_frequency_both_sides",
+        )
+    return HTFPolicy(
+        state=normalized_state,
+        allow_long=False,
+        allow_short=False,
+        frequency_divisor=0,
+        note="no_trade_volatile_regime",
+    )
+
+
+def get_latest_htf_signal(
+    df: pd.DataFrame,
+    *,
+    volatile_atr_ratio: float = 0.012,
+) -> HTFSignal:
+    """Classify the latest higher-timeframe regime into four deterministic states."""
+    feature_frame = add_indicators(df)
+    latest = feature_frame.iloc[-1]
+
+    atr_ratio = float(latest["atr_14"] / latest["close"]) if latest["close"] else 0.0
+    ema_50 = float(latest["ema_50"])
+    ema_200 = float(latest["ema_200"])
+    close = float(latest["close"])
+
+    trend_score = 0.0
+    if close > ema_50 > ema_200:
+        trend_score = 1.0
+        state = HTFState.BULLISH
+    elif close < ema_50 < ema_200:
+        trend_score = -1.0
+        state = HTFState.BEARISH
+    else:
+        state = HTFState.SIDEWAYS
+
+    if atr_ratio >= volatile_atr_ratio:
+        state = HTFState.VOLATILE
+
+    return HTFSignal(
+        state=state,
+        atr_ratio=atr_ratio,
+        trend_score=trend_score,
+        policy=get_htf_policy(state),
+    )
+
+
+def htf_allows_ltf_trade(
+    htf_state: HTFState | str,
+    ltf_bias: str,
+    *,
+    signal_index: int = 0,
+) -> bool:
+    """Return whether a lower-timeframe trade is allowed under the HTF regime."""
+    policy = get_htf_policy(htf_state)
+    normalized_bias = ltf_bias.lower()
+
+    if normalized_bias == "bullish" and not policy.allow_long:
+        return False
+    if normalized_bias == "bearish" and not policy.allow_short:
+        return False
+    if normalized_bias not in {"bullish", "bearish"}:
+        return False
+    if policy.frequency_divisor <= 0:
+        return False
+    return signal_index % policy.frequency_divisor == 0
