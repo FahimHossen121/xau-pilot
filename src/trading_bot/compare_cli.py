@@ -21,6 +21,28 @@ HTF_RULE = "1H"
 DEFAULT_CANDLE_COUNT = 3000
 
 
+def _parse_date_label(raw: str | None) -> datetime | None:
+    if raw is None:
+        return None
+    return datetime.fromisoformat(raw)
+
+
+def _build_report_stem(
+    *,
+    symbol: str,
+    timeframe: str,
+    htf_rule: str,
+    timestamp: str,
+    start_time: datetime | None,
+    end_time: datetime | None,
+) -> str:
+    if start_time is not None and end_time is not None:
+        window = f"{start_time:%Y%m%d}_to_{end_time:%Y%m%d}"
+    else:
+        window = "latest_window"
+    return f"{symbol.lower()}_{timeframe.lower()}_{htf_rule.lower()}_{window}_{timestamp}"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run the single active MT5 backtest scenario and export CSV reports."
@@ -35,6 +57,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_CANDLE_COUNT,
         help="Number of M5 candles to fetch from MT5",
+    )
+    parser.add_argument(
+        "--start-date",
+        default=None,
+        help="Inclusive start date/time in ISO format, for example 2026-01-01 or 2026-01-01T00:00:00",
+    )
+    parser.add_argument(
+        "--end-date",
+        default=None,
+        help="Exclusive end date/time in ISO format, for example 2026-03-26 or 2026-03-25T23:59:59",
     )
     parser.add_argument(
         "--max-daily-loss",
@@ -72,6 +104,10 @@ def main() -> None:
     max_daily_loss_fraction = (
         args.max_daily_loss if args.max_daily_loss is not None else settings.max_daily_loss
     )
+    start_time = _parse_date_label(args.start_date)
+    end_time = _parse_date_label(args.end_date)
+    if (start_time is None) != (end_time is None):
+        raise ValueError("start-date and end-date must be provided together.")
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -93,6 +129,8 @@ def main() -> None:
         max_daily_loss_fraction=max_daily_loss_fraction,
         cooldown_bars_after_loss=args.cooldown_bars,
         loss_streak_for_cooldown=args.cooldown_loss_streak,
+        start_time=start_time,
+        end_time=end_time,
         use_htf_filter=True,
         htf_rule=HTF_RULE,
     )
@@ -102,7 +140,9 @@ def main() -> None:
             scenario_name=SCENARIO_NAME,
             symbol=symbol,
             timeframe=EXECUTION_TIMEFRAME,
-            candle_count=args.count,
+            candle_count=args.count if start_time is None else -1,
+            window_start=start_time.isoformat() if start_time is not None else None,
+            window_end=end_time.isoformat() if end_time is not None else None,
             risk_fraction=risk_fraction,
             spread=args.spread,
             slippage=args.slippage,
@@ -132,7 +172,14 @@ def main() -> None:
     trades_df = pd.concat(trade_frames, ignore_index=True) if trade_frames else pd.DataFrame()
     sessions_df = pd.concat(session_frames, ignore_index=True) if session_frames else pd.DataFrame()
 
-    stem = f"{symbol.lower()}_{EXECUTION_TIMEFRAME.lower()}_{HTF_RULE.lower()}_{timestamp}"
+    stem = _build_report_stem(
+        symbol=symbol,
+        timeframe=EXECUTION_TIMEFRAME,
+        htf_rule=HTF_RULE,
+        timestamp=timestamp,
+        start_time=start_time,
+        end_time=end_time,
+    )
     summary_path = output_dir / f"{stem}_summary.csv"
     trades_path = output_dir / f"{stem}_trades.csv"
     sessions_path = output_dir / f"{stem}_sessions.csv"

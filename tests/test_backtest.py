@@ -157,6 +157,8 @@ def test_backtest_export_helpers_build_summary_and_trade_rows() -> None:
         symbol="XAUUSD",
         timeframe="M15",
         candle_count=rows,
+        window_start=None,
+        window_end=None,
         risk_fraction=0.01,
         spread=0.30,
         slippage=0.05,
@@ -176,6 +178,8 @@ def test_backtest_export_helpers_build_summary_and_trade_rows() -> None:
 
     assert summary_row["scenario_name"] == "demo"
     assert summary_row["symbol"] == "XAUUSD"
+    assert summary_row["window_start"] is None
+    assert summary_row["window_end"] is None
     assert "profit_factor" in summary_row
     assert "max_drawdown_pct" in summary_row
     assert "cooldown_events" in summary_row

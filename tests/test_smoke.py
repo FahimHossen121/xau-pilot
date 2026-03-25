@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from trading_bot.compare_cli import _build_report_stem, _parse_date_label
 from trading_bot.config import Settings
 
 
@@ -83,3 +84,22 @@ def test_settings_rejects_partial_mt5_config(monkeypatch: pytest.MonkeyPatch) ->
             Settings.from_env(dotenv_path=env_path)
     finally:
         env_path.unlink(missing_ok=True)
+
+
+def test_compare_cli_date_helpers_are_deterministic() -> None:
+    start_time = _parse_date_label("2026-01-01")
+    end_time = _parse_date_label("2026-03-25")
+
+    assert start_time is not None
+    assert end_time is not None
+
+    stem = _build_report_stem(
+        symbol="XAUUSD",
+        timeframe="M5",
+        htf_rule="1H",
+        timestamp="20260325_210000",
+        start_time=start_time,
+        end_time=end_time,
+    )
+
+    assert stem == "xauusd_m5_1h_20260101_to_20260325_20260325_210000"

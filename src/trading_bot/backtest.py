@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 
 import pandas as pd
 
@@ -522,6 +522,8 @@ def run_mt5_ltf_backtest(
     max_daily_loss_fraction: float = 0.03,
     cooldown_bars_after_loss: int = 3,
     loss_streak_for_cooldown: int = 2,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
     drop_incomplete_last_candle: bool = True,
     use_htf_filter: bool = False,
     htf_rule: str = "4H",
@@ -529,9 +531,13 @@ def run_mt5_ltf_backtest(
     weights: dict[str, float] | None = None,
 ) -> BacktestResult:
     """Fetch MT5 candles and run the paper-only LTF replay."""
-    from trading_bot.data import get_candles
+    from trading_bot.data import get_candles, get_candles_range
 
-    candles = get_candles(symbol, timeframe, count)
+    candles = (
+        get_candles_range(symbol, timeframe, start_time, end_time)
+        if start_time is not None and end_time is not None
+        else get_candles(symbol, timeframe, count)
+    )
     if drop_incomplete_last_candle and len(candles) > 1:
         candles = candles.iloc[:-1]
 
@@ -595,6 +601,8 @@ def backtest_result_to_row(
     symbol: str,
     timeframe: str,
     candle_count: int,
+    window_start: str | None = None,
+    window_end: str | None = None,
     risk_fraction: float,
     spread: float,
     slippage: float,
@@ -605,6 +613,8 @@ def backtest_result_to_row(
         "symbol": symbol,
         "timeframe": timeframe,
         "candle_count": candle_count,
+        "window_start": window_start,
+        "window_end": window_end,
         "risk_fraction": risk_fraction,
         "spread": spread,
         "slippage": slippage,
