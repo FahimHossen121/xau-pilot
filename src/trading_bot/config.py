@@ -1,19 +1,97 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+
+def _load_local_dotenv(dotenv_path: Path | None = None) -> None:
+    resolved_path = dotenv_path or (Path.cwd() / ".env")
+    if resolved_path.exists():
+        load_dotenv(dotenv_path=resolved_path, override=False)
+
+
+def _get_str(name: str, default: str = "") -> str:
+    return os.getenv(name, default).strip()
+
+
+def _get_bool(name: str, default: bool = False) -> bool:
+    raw = _get_str(name, str(default).lower()).lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _get_float(name: str, default: float) -> float:
+    raw = _get_str(name, str(default))
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a valid number.") from exc
+
+
+def _get_optional_int(name: str) -> int | None:
+    raw = _get_str(name)
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a valid integer.") from exc
 
 
 @dataclass(frozen=True)
 class Settings:
     app_mode: str
+    log_level: str
+    timezone: str
     symbol: str
+    max_risk_per_trade: float
+    max_daily_loss: float
+    mt5_login: int | None
+    mt5_password: str | None
+    mt5_server: str | None
+    gemini_api_key: str | None
+    gemini_model: str
     enable_trading: bool
 
     @classmethod
-    def from_env(cls) -> "Settings":
-        app_mode = os.getenv("APP_MODE", "paper").strip().lower()
+    def from_env(cls, dotenv_path: Path | None = None) -> "Settings":
+        _load_local_dotenv(dotenv_path)
+
+        app_mode = _get_str("APP_MODE", "paper").lower()
         if app_mode not in {"paper", "live"}:
             raise ValueError("APP_MODE must be 'paper' or 'live'.")
 
-        symbol = os.getenv("SYMBOL", "XAUUSD").strip().upper()
-        enable_trading = os.getenv("ENABLE_TRADING", "false").strip().lower() == "true"
-        return cls(app_mode=app_mode, symbol=symbol, enable_trading=enable_trading)
+        settings = cls(
+            app_mode=app_mode,
+            log_level=_get_str("LOG_LEVEL", "INFO").upper(),
+            timezone=_get_str("TIMEZONE", "UTC"),
+            symbol=_get_str("SYMBOL", "XAUUSD").upper(),
+            max_risk_per_trade=_get_float("MAX_RISK_PER_TRADE", 0.01),
+            max_daily_loss=_get_float("MAX_DAILY_LOSS", 0.03),
+            mt5_login=_get_optional_int("MT5_LOGIN"),
+            mt5_password=_get_str("MT5_PASSWORD") or None,
+            mt5_server=_get_str("MT5_SERVER") or None,
+            gemini_api_key=_get_str("GEMINI_API_KEY") or None,
+            gemini_model=_get_str("GEMINI_MODEL", "gemini-1.5-pro"),
+            enable_trading=_get_bool("ENABLE_TRADING", False),
+        )
+        settings._validate()
+        return settings
+
+    def _validate(self) -> None:
+        if not self.symbol:
+            raise ValueError("SYMBOL cannot be empty.")
+
+        if not 0 < self.max_risk_per_trade <= 1:
+            raise ValueError("MAX_RISK_PER_TRADE must be between 0 and 1.")
+
+        if not 0 < self.max_daily_loss <= 1:
+            raise ValueError("MAX_DAILY_LOSS must be between 0 and 1.")
+
+        mt5_values = [self.mt5_login, self.mt5_password, self.mt5_server]
+        if any(value is not None for value in mt5_values) and not all(mt5_values):
+            raise ValueError(
+                "MT5_LOGIN, MT5_PASSWORD, and MT5_SERVER must be set together."
+            )
