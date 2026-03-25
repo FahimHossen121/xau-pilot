@@ -51,8 +51,12 @@ class Settings:
     mt5_login: int | None
     mt5_password: str | None
     mt5_server: str | None
+    brave_api_key: str | None
     gemini_api_key: str | None
     gemini_model: str
+    ai_htf_refresh_hours: int
+    brave_news_freshness: str
+    brave_news_results_per_query: int
     enable_trading: bool
 
     @classmethod
@@ -73,8 +77,12 @@ class Settings:
             mt5_login=_get_optional_int("MT5_LOGIN"),
             mt5_password=_get_str("MT5_PASSWORD") or None,
             mt5_server=_get_str("MT5_SERVER") or None,
+            brave_api_key=_get_str("BRAVE_API_KEY") or None,
             gemini_api_key=_get_str("GEMINI_API_KEY") or None,
             gemini_model=_get_str("GEMINI_MODEL", "gemini-1.5-pro"),
+            ai_htf_refresh_hours=int(_get_float("AI_HTF_REFRESH_HOURS", 1.0)),
+            brave_news_freshness=_get_str("BRAVE_NEWS_FRESHNESS", "pd").lower(),
+            brave_news_results_per_query=int(_get_float("BRAVE_NEWS_RESULTS_PER_QUERY", 5.0)),
             enable_trading=_get_bool("ENABLE_TRADING", False),
         )
         settings._validate()
@@ -89,6 +97,15 @@ class Settings:
 
         if not 0 < self.max_daily_loss <= 1:
             raise ValueError("MAX_DAILY_LOSS must be between 0 and 1.")
+
+        if self.ai_htf_refresh_hours < 1:
+            raise ValueError("AI_HTF_REFRESH_HOURS must be at least 1.")
+
+        if self.brave_news_freshness not in {"pd", "pw", "pm", "py"}:
+            raise ValueError("BRAVE_NEWS_FRESHNESS must be one of: pd, pw, pm, py.")
+
+        if self.brave_news_results_per_query < 1:
+            raise ValueError("BRAVE_NEWS_RESULTS_PER_QUERY must be at least 1.")
 
         mt5_values = [self.mt5_login, self.mt5_password, self.mt5_server]
         if any(value is not None for value in mt5_values) and not all(mt5_values):

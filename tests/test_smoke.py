@@ -16,8 +16,12 @@ ENV_KEYS = [
     "MT5_LOGIN",
     "MT5_PASSWORD",
     "MT5_SERVER",
+    "BRAVE_API_KEY",
+    "BRAVE_NEWS_FRESHNESS",
+    "BRAVE_NEWS_RESULTS_PER_QUERY",
     "GEMINI_API_KEY",
     "GEMINI_MODEL",
+    "AI_HTF_REFRESH_HOURS",
     "ENABLE_TRADING",
 ]
 
@@ -53,7 +57,11 @@ def test_settings_loads_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
                 "MT5_LOGIN=123456",
                 "MT5_PASSWORD=test-password",
                 "MT5_SERVER=HFMarketsGlobal-Demo",
+                "BRAVE_API_KEY=test-brave-key",
+                "BRAVE_NEWS_FRESHNESS=pw",
+                "BRAVE_NEWS_RESULTS_PER_QUERY=4",
                 "ENABLE_TRADING=true",
+                "AI_HTF_REFRESH_HOURS=2",
             ]
         ),
         encoding="utf-8",
@@ -71,6 +79,10 @@ def test_settings_loads_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.max_daily_loss == 0.05
     assert settings.mt5_login == 123456
     assert settings.mt5_server == "HFMarketsGlobal-Demo"
+    assert settings.brave_api_key == "test-brave-key"
+    assert settings.brave_news_freshness == "pw"
+    assert settings.brave_news_results_per_query == 4
+    assert settings.ai_htf_refresh_hours == 2
     assert settings.enable_trading is True
 
 
