@@ -67,6 +67,7 @@ class SessionProfile:
     session: TradingSession
     trend_threshold_multiplier: float
     atr_floor_multiplier: float
+    sideways_enabled: bool
     range_edge: float
     range_buy_rsi: float
     range_sell_rsi: float
@@ -342,6 +343,21 @@ def get_trade_decision(
         )
 
     if current_htf_state == HTFState.SIDEWAYS.value:
+        if not profile.sideways_enabled:
+            return TradeDecision(
+                bias="neutral",
+                tradable=False,
+                strategy_mode="range_mean_reversion",
+                session=session,
+                htf_state=current_htf_state,
+                score=0.0,
+                threshold=profile.range_threshold,
+                atr_ratio=atr_ratio,
+                reward_to_risk=min(profile.reward_to_risk, 1.5),
+                atr_multiplier=profile.atr_multiplier,
+                reason="sideways_disabled_for_session",
+            )
+
         range_position = float(latest["range_position"])
         rsi_value = float(latest["rsi_14"])
         ema_neutral = float(latest["ema_spread_ratio"]) <= 0.0025
@@ -609,44 +625,48 @@ def get_session_profile(session: TradingSession | str) -> SessionProfile:
             session=normalized_session,
             trend_threshold_multiplier=1.10,
             atr_floor_multiplier=1.05,
+            sideways_enabled=False,
             range_edge=0.15,
             range_buy_rsi=35.0,
             range_sell_rsi=65.0,
             range_threshold=0.45,
             reward_to_risk=1.6,
             atr_multiplier=1.4,
-            note="quieter_session_more_selective",
+            note="quieter_session_trend_only",
         )
     if normalized_session is TradingSession.LONDON:
         return SessionProfile(
             session=normalized_session,
             trend_threshold_multiplier=0.95,
             atr_floor_multiplier=1.00,
+            sideways_enabled=False,
             range_edge=0.20,
             range_buy_rsi=40.0,
             range_sell_rsi=60.0,
             range_threshold=0.40,
             reward_to_risk=2.0,
             atr_multiplier=1.5,
-            note="most_active_hfm_gold_session",
+            note="most_active_hfm_gold_session_trend_only",
         )
     if normalized_session is TradingSession.NEW_YORK:
         return SessionProfile(
             session=normalized_session,
-            trend_threshold_multiplier=1.00,
-            atr_floor_multiplier=1.05,
+            trend_threshold_multiplier=1.08,
+            atr_floor_multiplier=1.10,
+            sideways_enabled=True,
             range_edge=0.18,
             range_buy_rsi=38.0,
             range_sell_rsi=62.0,
-            range_threshold=0.42,
+            range_threshold=0.46,
             reward_to_risk=1.9,
             atr_multiplier=1.5,
-            note="active_us_session",
+            note="active_us_session_selective_trend_and_range",
         )
     return SessionProfile(
         session=normalized_session,
         trend_threshold_multiplier=1.20,
         atr_floor_multiplier=1.20,
+        sideways_enabled=False,
         range_edge=0.10,
         range_buy_rsi=30.0,
         range_sell_rsi=70.0,

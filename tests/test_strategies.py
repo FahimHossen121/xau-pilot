@@ -193,7 +193,9 @@ def test_get_trading_session_and_profile_are_deterministic() -> None:
     assert get_trading_session(london) is TradingSession.LONDON
     assert get_trading_session(new_york) is TradingSession.NEW_YORK
     assert get_trading_session(off_hours) is TradingSession.OFF_HOURS
-    assert get_session_profile(TradingSession.LONDON).note == "most_active_hfm_gold_session"
+    assert get_session_profile(TradingSession.ASIA).sideways_enabled is False
+    assert get_session_profile(TradingSession.LONDON).sideways_enabled is False
+    assert get_session_profile(TradingSession.NEW_YORK).sideways_enabled is True
 
 
 def test_get_trade_decision_uses_sideways_range_logic() -> None:
@@ -208,13 +210,42 @@ def test_get_trade_decision_uses_sideways_range_logic() -> None:
             "low": close - 1.0,
             "close": close,
         },
-        index=pd.date_range("2025-01-01", periods=rows, freq="15min"),
+        index=pd.date_range("2025-01-01 13:00:00", periods=rows, freq="15min"),
     )
 
-    decision = get_trade_decision(df, htf_state=HTFState.SIDEWAYS.value)
+    decision = get_trade_decision(
+        df,
+        timestamp=pd.Timestamp("2025-01-03 14:00:00"),
+        htf_state=HTFState.SIDEWAYS.value,
+    )
 
     assert decision.strategy_mode == "range_mean_reversion"
     assert decision.reward_to_risk <= 1.5
+
+
+def test_get_trade_decision_blocks_sideways_in_asia() -> None:
+    rows = 250
+    base = np.full(rows, 100.0)
+    close = pd.Series(base)
+    close.iloc[-1] = 99.0
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close + 1.0,
+            "low": close - 1.0,
+            "close": close,
+        },
+        index=pd.date_range("2025-01-01", periods=rows, freq="15min"),
+    )
+
+    decision = get_trade_decision(
+        df,
+        timestamp=pd.Timestamp("2025-01-02 02:00:00"),
+        htf_state=HTFState.SIDEWAYS.value,
+    )
+
+    assert decision.tradable is False
+    assert decision.reason == "sideways_disabled_for_session"
 
 
 def test_get_trade_decision_blocks_trade_when_htf_is_volatile() -> None:
