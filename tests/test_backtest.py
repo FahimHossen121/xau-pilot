@@ -1,7 +1,12 @@
 import numpy as np
 import pandas as pd
 
-from trading_bot.backtest import format_backtest_summary, run_ltf_backtest
+from trading_bot.backtest import (
+    backtest_result_to_row,
+    backtest_trades_to_frame,
+    format_backtest_summary,
+    run_ltf_backtest,
+)
 
 
 def test_run_ltf_backtest_profitable_on_clear_uptrend() -> None:
@@ -105,3 +110,42 @@ def test_format_backtest_summary_includes_core_metrics() -> None:
     assert "Profit factor:" in summary
     assert "Max drawdown:" in summary
     assert "HTF filter enabled:" in summary
+
+
+def test_backtest_export_helpers_build_summary_and_trade_rows() -> None:
+    rows = 320
+    close = np.linspace(100.0, 180.0, rows)
+    df = pd.DataFrame(
+        {
+            "open": close - 0.5,
+            "high": close + 3.0,
+            "low": close - 1.0,
+            "close": close,
+        },
+        index=pd.date_range("2025-01-01", periods=rows, freq="15min"),
+    )
+
+    result = run_ltf_backtest(df, use_htf_filter=True, htf_rule="4H")
+    summary_row = backtest_result_to_row(
+        result,
+        scenario_name="demo",
+        symbol="XAUUSD",
+        timeframe="M15",
+        candle_count=rows,
+        risk_fraction=0.01,
+        spread=0.30,
+        slippage=0.05,
+    )
+    trades_df = backtest_trades_to_frame(
+        result,
+        scenario_name="demo",
+        symbol="XAUUSD",
+        timeframe="M15",
+    )
+
+    assert summary_row["scenario_name"] == "demo"
+    assert summary_row["symbol"] == "XAUUSD"
+    assert "profit_factor" in summary_row
+    assert "max_drawdown_pct" in summary_row
+    assert "scenario_name" in trades_df.columns
+    assert "transaction_cost" in trades_df.columns

@@ -392,3 +392,89 @@ def format_backtest_summary(result: BacktestResult) -> str:
         f"HTF rule: {result.htf_rule or 'none'}",
     ]
     return "\n".join(lines)
+
+
+def backtest_result_to_row(
+    result: BacktestResult,
+    *,
+    scenario_name: str,
+    symbol: str,
+    timeframe: str,
+    candle_count: int,
+    risk_fraction: float,
+    spread: float,
+    slippage: float,
+) -> dict[str, float | int | str | bool | None]:
+    """Flatten a backtest result into a single summary row for CSV export."""
+    return {
+        "scenario_name": scenario_name,
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "candle_count": candle_count,
+        "risk_fraction": risk_fraction,
+        "spread": spread,
+        "slippage": slippage,
+        "used_htf_filter": result.used_htf_filter,
+        "htf_rule": result.htf_rule,
+        "initial_balance": result.initial_balance,
+        "final_balance": result.final_balance,
+        "total_pnl": result.total_pnl,
+        "total_return_pct": result.total_return_pct,
+        "trade_count": result.trade_count,
+        "win_count": result.win_count,
+        "loss_count": result.loss_count,
+        "win_rate": result.win_rate,
+        "average_r_multiple": result.average_r_multiple,
+        "total_r_multiple": result.total_r_multiple,
+        "gross_profit": result.gross_profit,
+        "gross_loss": result.gross_loss,
+        "profit_factor": result.profit_factor,
+        "average_win": result.average_win,
+        "average_loss": result.average_loss,
+        "max_drawdown_pct": result.max_drawdown_pct,
+    }
+
+
+def backtest_trades_to_frame(
+    result: BacktestResult,
+    *,
+    scenario_name: str,
+    symbol: str,
+    timeframe: str,
+) -> pd.DataFrame:
+    """Convert the executed trades into a CSV-friendly dataframe."""
+    columns = [
+        "scenario_name",
+        "symbol",
+        "timeframe",
+        "entry_time",
+        "exit_time",
+        "side",
+        "entry_price",
+        "exit_price",
+        "pnl",
+        "r_multiple",
+        "exit_reason",
+        "transaction_cost",
+        "htf_state",
+    ]
+    rows: list[dict[str, float | str | None]] = []
+    for trade in result.trades:
+        rows.append(
+            {
+                "scenario_name": scenario_name,
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "entry_time": trade.entry_time,
+                "exit_time": trade.exit_time,
+                "side": trade.side,
+                "entry_price": trade.entry_price,
+                "exit_price": trade.exit_price,
+                "pnl": trade.pnl,
+                "r_multiple": trade.r_multiple,
+                "exit_reason": trade.exit_reason,
+                "transaction_cost": trade.transaction_cost,
+                "htf_state": trade.htf_state,
+            }
+        )
+    return pd.DataFrame(rows, columns=columns)
