@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from trading_bot.backtest import run_ltf_backtest
+from trading_bot.backtest import format_backtest_summary, run_ltf_backtest
 
 
 def test_run_ltf_backtest_profitable_on_clear_uptrend() -> None:
@@ -41,3 +41,24 @@ def test_run_ltf_backtest_skips_flat_market_when_atr_filter_is_high() -> None:
 
     assert result.trade_count == 0
     assert result.final_balance == result.initial_balance
+
+
+def test_format_backtest_summary_includes_core_metrics() -> None:
+    rows = 320
+    close = np.linspace(100.0, 180.0, rows)
+    df = pd.DataFrame(
+        {
+            "open": close - 0.5,
+            "high": close + 3.0,
+            "low": close - 1.0,
+            "close": close,
+        },
+        index=pd.date_range("2025-01-01", periods=rows, freq="15min"),
+    )
+
+    result = run_ltf_backtest(df)
+    summary = format_backtest_summary(result)
+
+    assert "Backtest Summary" in summary
+    assert "Final balance:" in summary
+    assert "Trades:" in summary

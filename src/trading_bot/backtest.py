@@ -227,3 +227,51 @@ def run_ltf_backtest(
         average_r_multiple=average_r_multiple,
         trades=trades,
     )
+
+
+def run_mt5_ltf_backtest(
+    *,
+    symbol: str,
+    timeframe: int,
+    count: int,
+    initial_balance: float = 1000.0,
+    risk_fraction: float = 0.01,
+    threshold: float = DEFAULT_LTF_THRESHOLD,
+    atr_floor_ratio: float = DEFAULT_ATR_FLOOR_RATIO,
+    structure_lookback: int = DEFAULT_STRUCTURE_LOOKBACK,
+    atr_multiplier: float = 1.5,
+    reward_to_risk: float = 2.0,
+    weights: dict[str, float] | None = None,
+) -> BacktestResult:
+    """Fetch MT5 candles and run the paper-only LTF replay."""
+    from trading_bot.data import get_candles
+
+    candles = get_candles(symbol, timeframe, count)
+    return run_ltf_backtest(
+        candles,
+        initial_balance=initial_balance,
+        risk_fraction=risk_fraction,
+        threshold=threshold,
+        atr_floor_ratio=atr_floor_ratio,
+        structure_lookback=structure_lookback,
+        atr_multiplier=atr_multiplier,
+        reward_to_risk=reward_to_risk,
+        weights=weights,
+    )
+
+
+def format_backtest_summary(result: BacktestResult) -> str:
+    """Return a short human-readable summary for terminal output."""
+    lines = [
+        "Backtest Summary",
+        f"Initial balance: {result.initial_balance:.2f}",
+        f"Final balance: {result.final_balance:.2f}",
+        f"Total PnL: {result.total_pnl:.2f}",
+        f"Return: {result.total_return_pct * 100:.2f}%",
+        f"Trades: {result.trade_count}",
+        f"Wins: {result.win_count}",
+        f"Losses: {result.loss_count}",
+        f"Win rate: {result.win_rate * 100:.2f}%",
+        f"Average R multiple: {result.average_r_multiple:.2f}",
+    ]
+    return "\n".join(lines)
