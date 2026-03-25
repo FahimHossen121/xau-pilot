@@ -63,6 +63,26 @@ def test_run_ltf_backtest_transaction_costs_reduce_results() -> None:
     assert sum(trade.transaction_cost for trade in with_cost.trades) > 0
 
 
+def test_run_ltf_backtest_with_htf_filter_blocks_volatile_regime() -> None:
+    rows = 320
+    close = np.linspace(100.0, 180.0, rows)
+    df = pd.DataFrame(
+        {
+            "open": close - 0.5,
+            "high": close + 8.0,
+            "low": close - 8.0,
+            "close": close,
+        },
+        index=pd.date_range("2025-01-01", periods=rows, freq="15min"),
+    )
+
+    no_filter = run_ltf_backtest(df, use_htf_filter=False)
+    with_filter = run_ltf_backtest(df, use_htf_filter=True, htf_rule="4H", htf_volatile_atr_ratio=0.01)
+
+    assert no_filter.trade_count > 0
+    assert with_filter.trade_count == 0
+
+
 def test_format_backtest_summary_includes_core_metrics() -> None:
     rows = 320
     close = np.linspace(100.0, 180.0, rows)
@@ -84,3 +104,4 @@ def test_format_backtest_summary_includes_core_metrics() -> None:
     assert "Trades:" in summary
     assert "Profit factor:" in summary
     assert "Max drawdown:" in summary
+    assert "HTF filter enabled:" in summary

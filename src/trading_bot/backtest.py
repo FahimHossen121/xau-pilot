@@ -13,6 +13,8 @@ from trading_bot.strategies import (
     DEFAULT_STRUCTURE_LOOKBACK,
     DEFAULT_LTF_WEIGHTS,
     add_ltf_features,
+    get_htf_state_series,
+    htf_allows_ltf_trade,
 )
 
 
@@ -27,6 +29,7 @@ class BacktestTrade:
     r_multiple: float
     exit_reason: str
     transaction_cost: float
+    htf_state: str | None = None
 
 
 @dataclass(frozen=True)
@@ -47,6 +50,8 @@ class BacktestResult:
     average_win: float
     average_loss: float
     max_drawdown_pct: float
+    used_htf_filter: bool
+    htf_rule: str | None
     trades: list[BacktestTrade]
 
 
@@ -55,6 +60,7 @@ class _OpenPosition:
     trade_plan: TradePlan
     entry_time: pd.Timestamp
     risk_amount: float
+    htf_state: str | None = None
 
 
 def _resolve_exit(
@@ -120,6 +126,7 @@ def _resolve_exit(
         r_multiple=pnl / position.risk_amount,
         exit_reason=reason,
         transaction_cost=transaction_cost,
+        htf_state=position.htf_state,
     )
 
 
@@ -135,6 +142,9 @@ def run_ltf_backtest(
     reward_to_risk: float = 2.0,
     spread: float = 0.0,
     slippage: float = 0.0,
+    use_htf_filter: bool = False,
+    htf_rule: str = "4H",
+    htf_volatile_atr_ratio: float = 0.012,
     weights: dict[str, float] | None = None,
 ) -> BacktestResult:
     """Replay candles, open on the next bar, and exit on stop or TP2."""
@@ -150,11 +160,21 @@ def run_ltf_backtest(
         structure_lookback=structure_lookback,
         weights=weights or DEFAULT_LTF_WEIGHTS,
     )
+    htf_states = (
+        get_htf_state_series(
+            df,
+            rule=htf_rule,
+            volatile_atr_ratio=htf_volatile_atr_ratio,
+        )
+        if use_htf_filter
+        else None
+    )
 
     balance = initial_balance
     trades: list[BacktestTrade] = []
     open_position: _OpenPosition | None = None
     warmup_bars = max(200, structure_lookback)
+    signal_counter = 0
 
     for index in range(warmup_bars + 1, len(feature_frame)):
         current_row = feature_frame.iloc[index]
@@ -185,10 +205,18 @@ def run_ltf_backtest(
 
         if score >= threshold:
             side = "long"
+            ltf_bias = "bullish"
         elif score <= -threshold:
             side = "short"
+            ltf_bias = "bearish"
         else:
             continue
+
+        signal_counter += 1
+        htf_state = str(htf_states.iloc[index - 1]) if htf_states is not None else None
+        if use_htf_filter and htf_state is not None:
+            if not htf_allows_ltf_trade(htf_state, ltf_bias, signal_index=signal_counter - 1):
+                continue
 
         trade_plan = build_trade_plan(
             side=side,
@@ -203,6 +231,7 @@ def run_ltf_backtest(
             trade_plan=trade_plan,
             entry_time=current_time,
             risk_amount=trade_plan.risk_amount,
+            htf_state=htf_state,
         )
 
         closed_trade = _resolve_exit(
@@ -238,6 +267,7 @@ def run_ltf_backtest(
                 r_multiple=pnl / open_position.risk_amount,
                 exit_reason="end_of_data",
                 transaction_cost=transaction_cost,
+                htf_state=open_position.htf_state,
             )
         )
         balance += pnl
@@ -287,6 +317,8 @@ def run_ltf_backtest(
         average_win=average_win,
         average_loss=average_loss,
         max_drawdown_pct=max_drawdown_pct,
+        used_htf_filter=use_htf_filter,
+        htf_rule=htf_rule if use_htf_filter else None,
         trades=trades,
     )
 
@@ -306,6 +338,9 @@ def run_mt5_ltf_backtest(
     spread: float = 0.0,
     slippage: float = 0.0,
     drop_incomplete_last_candle: bool = True,
+    use_htf_filter: bool = False,
+    htf_rule: str = "4H",
+    htf_volatile_atr_ratio: float = 0.012,
     weights: dict[str, float] | None = None,
 ) -> BacktestResult:
     """Fetch MT5 candles and run the paper-only LTF replay."""
@@ -326,6 +361,9 @@ def run_mt5_ltf_backtest(
         reward_to_risk=reward_to_risk,
         spread=spread,
         slippage=slippage,
+        use_htf_filter=use_htf_filter,
+        htf_rule=htf_rule,
+        htf_volatile_atr_ratio=htf_volatile_atr_ratio,
         weights=weights,
     )
 
@@ -350,5 +388,7 @@ def format_backtest_summary(result: BacktestResult) -> str:
         f"Average win: {result.average_win:.2f}",
         f"Average loss: {result.average_loss:.2f}",
         f"Max drawdown: {result.max_drawdown_pct * 100:.2f}%",
+        f"HTF filter enabled: {result.used_htf_filter}",
+        f"HTF rule: {result.htf_rule or 'none'}",
     ]
     return "\n".join(lines)

@@ -55,6 +55,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.0,
         help="Absolute price slippage assumption per side",
     )
+    parser.add_argument(
+        "--use-htf-filter",
+        action="store_true",
+        help="Enable higher-timeframe technical regime filtering",
+    )
+    parser.add_argument(
+        "--htf-rule",
+        default="4H",
+        help="Pandas resample rule used to derive higher-timeframe technical states",
+    )
     return parser
 
 
@@ -71,6 +81,8 @@ def main() -> None:
         risk_fraction=args.risk if args.risk is not None else settings.max_risk_per_trade,
         spread=args.spread,
         slippage=args.slippage,
+        use_htf_filter=args.use_htf_filter,
+        htf_rule=args.htf_rule,
     )
     print(format_backtest_summary(result))
 

@@ -6,6 +6,7 @@ from trading_bot.strategies import (
     HTFState,
     add_indicators,
     add_ltf_features,
+    get_htf_state_series,
     get_htf_policy,
     get_latest_htf_signal,
     get_latest_ltf_signal,
@@ -156,3 +157,23 @@ def test_htf_allows_ltf_trade_respects_sideways_frequency_control() -> None:
     assert htf_allows_ltf_trade(HTFState.SIDEWAYS, "bearish", signal_index=1) is False
     assert htf_allows_ltf_trade(HTFState.BULLISH, "bearish", signal_index=0) is False
     assert htf_allows_ltf_trade(HTFState.VOLATILE, "bullish", signal_index=0) is False
+
+
+def test_get_htf_state_series_projects_states_to_ltf_index() -> None:
+    rows = 300
+    index = pd.date_range("2025-01-01", periods=rows, freq="15min")
+    close = np.linspace(100.0, 160.0, rows)
+    df = pd.DataFrame(
+        {
+            "open": close - 0.2,
+            "high": close + 0.6,
+            "low": close - 0.6,
+            "close": close,
+        },
+        index=index,
+    )
+
+    states = get_htf_state_series(df, rule="4H")
+
+    assert len(states) == len(df)
+    assert set(states.unique()).issubset({state.value for state in HTFState})

@@ -62,6 +62,15 @@ def _validate_price_frame(df: pd.DataFrame) -> None:
         raise ValueError(f"DataFrame is missing required columns: {missing}")
 
 
+def _validate_datetime_index(df: pd.DataFrame) -> None:
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise ValueError("DataFrame index must be a DatetimeIndex.")
+
+
+def _normalize_resample_rule(rule: str) -> str:
+    return rule.replace("H", "h")
+
+
 def _validate_indicator_frame(df: pd.DataFrame) -> None:
     missing_columns = REQUIRED_INDICATOR_COLUMNS.difference(df.columns)
     if missing_columns:
@@ -94,6 +103,23 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     frame["atr_14"] = true_range.ewm(alpha=1 / 14, adjust=False).mean()
 
     return frame
+
+
+def resample_ohlc(df: pd.DataFrame, rule: str) -> pd.DataFrame:
+    """Resample lower-timeframe candles into a higher-timeframe OHLC frame."""
+    _validate_price_frame(df)
+    _validate_datetime_index(df)
+    normalized_rule = _normalize_resample_rule(rule)
+
+    resampled = df.resample(normalized_rule).agg(
+        {
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+        }
+    )
+    return resampled.dropna()
 
 
 def add_ltf_features(
@@ -240,6 +266,8 @@ def get_latest_htf_signal(
     df: pd.DataFrame,
     *,
     volatile_atr_ratio: float = 0.012,
+    bullish_rsi_floor: float = 55.0,
+    bearish_rsi_ceiling: float = 45.0,
 ) -> HTFSignal:
     """Classify the latest higher-timeframe regime into four deterministic states."""
     feature_frame = add_indicators(df)
@@ -249,12 +277,13 @@ def get_latest_htf_signal(
     ema_50 = float(latest["ema_50"])
     ema_200 = float(latest["ema_200"])
     close = float(latest["close"])
+    rsi_14 = float(latest["rsi_14"])
 
     trend_score = 0.0
-    if close > ema_50 > ema_200:
+    if close > ema_50 > ema_200 and rsi_14 >= bullish_rsi_floor:
         trend_score = 1.0
         state = HTFState.BULLISH
-    elif close < ema_50 < ema_200:
+    elif close < ema_50 < ema_200 and rsi_14 <= bearish_rsi_ceiling:
         trend_score = -1.0
         state = HTFState.BEARISH
     else:
@@ -269,6 +298,34 @@ def get_latest_htf_signal(
         trend_score=trend_score,
         policy=get_htf_policy(state),
     )
+
+
+def get_htf_state_series(
+    df: pd.DataFrame,
+    *,
+    rule: str = "4H",
+    volatile_atr_ratio: float = 0.012,
+    bullish_rsi_floor: float = 55.0,
+    bearish_rsi_ceiling: float = 45.0,
+) -> pd.Series:
+    """Project higher-timeframe regime states onto a lower-timeframe candle index."""
+    htf_df = resample_ohlc(df, rule)
+    htf_states = htf_df.apply(
+        lambda _: None,
+        axis=1,
+    )
+    htf_states = htf_df.apply(
+        lambda row: get_latest_htf_signal(
+            htf_df.loc[: row.name],
+            volatile_atr_ratio=volatile_atr_ratio,
+            bullish_rsi_floor=bullish_rsi_floor,
+            bearish_rsi_ceiling=bearish_rsi_ceiling,
+        ).state.value,
+        axis=1,
+    )
+
+    projected = htf_states.reindex(df.index, method="ffill")
+    return projected.fillna(HTFState.SIDEWAYS.value)
 
 
 def htf_allows_ltf_trade(
