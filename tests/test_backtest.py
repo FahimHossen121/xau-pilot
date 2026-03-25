@@ -88,6 +88,26 @@ def test_run_ltf_backtest_with_htf_filter_blocks_volatile_regime() -> None:
     assert with_filter.trade_count == 0
 
 
+def test_run_ltf_backtest_includes_session_and_strategy_mode_on_trades() -> None:
+    rows = 320
+    close = np.linspace(100.0, 180.0, rows)
+    df = pd.DataFrame(
+        {
+            "open": close - 0.5,
+            "high": close + 3.0,
+            "low": close - 1.0,
+            "close": close,
+        },
+        index=pd.date_range("2025-01-01", periods=rows, freq="15min"),
+    )
+
+    result = run_ltf_backtest(df)
+
+    assert result.trade_count > 0
+    assert result.trades[0].session is not None
+    assert result.trades[0].strategy_mode in {"trend_following", "range_mean_reversion"}
+
+
 def test_format_backtest_summary_includes_core_metrics() -> None:
     rows = 320
     close = np.linspace(100.0, 180.0, rows)
@@ -148,4 +168,6 @@ def test_backtest_export_helpers_build_summary_and_trade_rows() -> None:
     assert "profit_factor" in summary_row
     assert "max_drawdown_pct" in summary_row
     assert "scenario_name" in trades_df.columns
+    assert "session" in trades_df.columns
+    assert "strategy_mode" in trades_df.columns
     assert "transaction_cost" in trades_df.columns

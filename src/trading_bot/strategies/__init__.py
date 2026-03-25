@@ -55,6 +55,42 @@ class HTFSignal:
     policy: HTFPolicy
 
 
+class TradingSession(str, Enum):
+    ASIA = "asia"
+    LONDON = "london"
+    NEW_YORK = "new_york"
+    OFF_HOURS = "off_hours"
+
+
+@dataclass(frozen=True)
+class SessionProfile:
+    session: TradingSession
+    trend_threshold_multiplier: float
+    atr_floor_multiplier: float
+    range_edge: float
+    range_buy_rsi: float
+    range_sell_rsi: float
+    range_threshold: float
+    reward_to_risk: float
+    atr_multiplier: float
+    note: str
+
+
+@dataclass(frozen=True)
+class TradeDecision:
+    bias: str
+    tradable: bool
+    strategy_mode: str
+    session: TradingSession
+    htf_state: str | None
+    score: float
+    threshold: float
+    atr_ratio: float
+    reward_to_risk: float
+    atr_multiplier: float
+    reason: str | None = None
+
+
 def _validate_price_frame(df: pd.DataFrame) -> None:
     missing_columns = REQUIRED_PRICE_COLUMNS.difference(df.columns)
     if missing_columns:
@@ -169,6 +205,15 @@ def add_ltf_features(
         + active_weights["rsi"] * frame["rsi_signal"]
         + active_weights["structure"] * frame["structure_signal"]
     )
+    frame["range_high"] = prior_high
+    frame["range_low"] = prior_low
+    range_width = (frame["range_high"] - frame["range_low"]).replace(0, pd.NA)
+    frame["range_position"] = (
+        ((frame["close"] - frame["range_low"]) / range_width).clip(0.0, 1.0).fillna(0.5)
+    )
+    frame["ema_spread_ratio"] = (
+        (frame["ema_50"] - frame["ema_200"]).abs() / frame["close"]
+    ).fillna(0.0)
 
     return frame
 
@@ -226,6 +271,186 @@ def get_latest_ltf_signal(
     )
 
 
+def get_trade_decision(
+    df: pd.DataFrame,
+    *,
+    timestamp: pd.Timestamp | None = None,
+    htf_state: HTFState | str | None = None,
+    threshold: float = DEFAULT_LTF_THRESHOLD,
+    atr_floor_ratio: float = DEFAULT_ATR_FLOOR_RATIO,
+    structure_lookback: int = DEFAULT_STRUCTURE_LOOKBACK,
+    weights: dict[str, float] | None = None,
+) -> TradeDecision:
+    """Return a session-aware trade decision from the latest available LTF features."""
+    feature_frame = add_ltf_features(
+        df,
+        structure_lookback=structure_lookback,
+        weights=weights,
+    )
+    latest = feature_frame.iloc[-1]
+    current_timestamp = timestamp or feature_frame.index[-1]
+    session = get_trading_session(current_timestamp)
+    profile = get_session_profile(session)
+
+    current_htf_state = str(htf_state) if htf_state is not None else None
+    atr_ratio = float(latest["atr_ratio"])
+    effective_atr_floor = atr_floor_ratio * profile.atr_floor_multiplier
+
+    if current_htf_state == HTFState.VOLATILE.value:
+        return TradeDecision(
+            bias="neutral",
+            tradable=False,
+            strategy_mode="blocked",
+            session=session,
+            htf_state=current_htf_state,
+            score=0.0,
+            threshold=threshold,
+            atr_ratio=atr_ratio,
+            reward_to_risk=profile.reward_to_risk,
+            atr_multiplier=profile.atr_multiplier,
+            reason="htf_volatile",
+        )
+
+    if current_htf_state != HTFState.SIDEWAYS.value and atr_ratio < effective_atr_floor:
+        return TradeDecision(
+            bias="neutral",
+            tradable=False,
+            strategy_mode="blocked",
+            session=session,
+            htf_state=current_htf_state,
+            score=float(latest["ltf_score"]),
+            threshold=threshold,
+            atr_ratio=atr_ratio,
+            reward_to_risk=profile.reward_to_risk,
+            atr_multiplier=profile.atr_multiplier,
+            reason="atr_below_session_floor",
+        )
+
+    if current_htf_state == HTFState.SIDEWAYS.value:
+        range_position = float(latest["range_position"])
+        rsi_value = float(latest["rsi_14"])
+        ema_neutral = float(latest["ema_spread_ratio"]) <= 0.0025
+
+        long_edge = max(0.0, (profile.range_edge - range_position) / profile.range_edge)
+        short_edge = max(
+            0.0,
+            (range_position - (1.0 - profile.range_edge)) / profile.range_edge,
+        )
+        long_rsi = max(0.0, (profile.range_buy_rsi - rsi_value) / max(profile.range_buy_rsi, 1.0))
+        short_rsi = max(
+            0.0,
+            (rsi_value - profile.range_sell_rsi) / max(100.0 - profile.range_sell_rsi, 1.0),
+        )
+
+        long_score = (0.65 * long_edge) + (0.35 * long_rsi)
+        short_score = (0.65 * short_edge) + (0.35 * short_rsi)
+        score = long_score - short_score
+
+        if not ema_neutral:
+            return TradeDecision(
+                bias="neutral",
+                tradable=False,
+                strategy_mode="range_mean_reversion",
+                session=session,
+                htf_state=current_htf_state,
+                score=score,
+                threshold=profile.range_threshold,
+                atr_ratio=atr_ratio,
+                reward_to_risk=min(profile.reward_to_risk, 1.5),
+                atr_multiplier=profile.atr_multiplier,
+                reason="sideways_not_neutral_enough",
+            )
+
+        if score >= profile.range_threshold:
+            bias = "bullish"
+            tradable = True
+        elif score <= -profile.range_threshold:
+            bias = "bearish"
+            tradable = True
+        else:
+            bias = "neutral"
+            tradable = False
+
+        return TradeDecision(
+            bias=bias,
+            tradable=tradable,
+            strategy_mode="range_mean_reversion",
+            session=session,
+            htf_state=current_htf_state,
+            score=score,
+            threshold=profile.range_threshold,
+            atr_ratio=atr_ratio,
+            reward_to_risk=min(profile.reward_to_risk, 1.5),
+            atr_multiplier=profile.atr_multiplier,
+            reason=None if tradable else "sideways_signal_not_strong_enough",
+        )
+
+    effective_threshold = threshold * profile.trend_threshold_multiplier
+    score = float(latest["ltf_score"])
+
+    if score >= effective_threshold:
+        bias = "bullish"
+    elif score <= -effective_threshold:
+        bias = "bearish"
+    else:
+        return TradeDecision(
+            bias="neutral",
+            tradable=False,
+            strategy_mode="trend_following",
+            session=session,
+            htf_state=current_htf_state,
+            score=score,
+            threshold=effective_threshold,
+            atr_ratio=atr_ratio,
+            reward_to_risk=profile.reward_to_risk,
+            atr_multiplier=profile.atr_multiplier,
+            reason="trend_signal_below_session_threshold",
+        )
+
+    if current_htf_state == HTFState.BULLISH.value and bias != "bullish":
+        return TradeDecision(
+            bias="neutral",
+            tradable=False,
+            strategy_mode="trend_following",
+            session=session,
+            htf_state=current_htf_state,
+            score=score,
+            threshold=effective_threshold,
+            atr_ratio=atr_ratio,
+            reward_to_risk=profile.reward_to_risk,
+            atr_multiplier=profile.atr_multiplier,
+            reason="htf_bullish_blocks_short",
+        )
+    if current_htf_state == HTFState.BEARISH.value and bias != "bearish":
+        return TradeDecision(
+            bias="neutral",
+            tradable=False,
+            strategy_mode="trend_following",
+            session=session,
+            htf_state=current_htf_state,
+            score=score,
+            threshold=effective_threshold,
+            atr_ratio=atr_ratio,
+            reward_to_risk=profile.reward_to_risk,
+            atr_multiplier=profile.atr_multiplier,
+            reason="htf_bearish_blocks_long",
+        )
+
+    return TradeDecision(
+        bias=bias,
+        tradable=True,
+        strategy_mode="trend_following",
+        session=session,
+        htf_state=current_htf_state,
+        score=score,
+        threshold=effective_threshold,
+        atr_ratio=atr_ratio,
+        reward_to_risk=profile.reward_to_risk,
+        atr_multiplier=profile.atr_multiplier,
+        reason=None,
+    )
+
+
 def get_htf_policy(state: HTFState | str) -> HTFPolicy:
     normalized_state = HTFState(state)
 
@@ -250,8 +475,8 @@ def get_htf_policy(state: HTFState | str) -> HTFPolicy:
             state=normalized_state,
             allow_long=True,
             allow_short=True,
-            frequency_divisor=3,
-            note="reduced_frequency_both_sides",
+            frequency_divisor=1,
+            note="range_logic_both_sides",
         )
     return HTFPolicy(
         state=normalized_state,
@@ -347,3 +572,71 @@ def htf_allows_ltf_trade(
     if policy.frequency_divisor <= 0:
         return False
     return signal_index % policy.frequency_divisor == 0
+
+
+def get_trading_session(timestamp: pd.Timestamp) -> TradingSession:
+    """Map a candle timestamp to a broad UTC trading session."""
+    hour = timestamp.hour
+    if 0 <= hour < 8:
+        return TradingSession.ASIA
+    if 8 <= hour < 13:
+        return TradingSession.LONDON
+    if 13 <= hour < 18:
+        return TradingSession.NEW_YORK
+    return TradingSession.OFF_HOURS
+
+
+def get_session_profile(session: TradingSession | str) -> SessionProfile:
+    normalized_session = TradingSession(session)
+
+    if normalized_session is TradingSession.ASIA:
+        return SessionProfile(
+            session=normalized_session,
+            trend_threshold_multiplier=1.10,
+            atr_floor_multiplier=1.05,
+            range_edge=0.15,
+            range_buy_rsi=35.0,
+            range_sell_rsi=65.0,
+            range_threshold=0.45,
+            reward_to_risk=1.6,
+            atr_multiplier=1.4,
+            note="quieter_session_more_selective",
+        )
+    if normalized_session is TradingSession.LONDON:
+        return SessionProfile(
+            session=normalized_session,
+            trend_threshold_multiplier=0.95,
+            atr_floor_multiplier=1.00,
+            range_edge=0.20,
+            range_buy_rsi=40.0,
+            range_sell_rsi=60.0,
+            range_threshold=0.40,
+            reward_to_risk=2.0,
+            atr_multiplier=1.5,
+            note="most_active_hfm_gold_session",
+        )
+    if normalized_session is TradingSession.NEW_YORK:
+        return SessionProfile(
+            session=normalized_session,
+            trend_threshold_multiplier=1.00,
+            atr_floor_multiplier=1.05,
+            range_edge=0.18,
+            range_buy_rsi=38.0,
+            range_sell_rsi=62.0,
+            range_threshold=0.42,
+            reward_to_risk=1.9,
+            atr_multiplier=1.5,
+            note="active_us_session",
+        )
+    return SessionProfile(
+        session=normalized_session,
+        trend_threshold_multiplier=1.20,
+        atr_floor_multiplier=1.20,
+        range_edge=0.10,
+        range_buy_rsi=30.0,
+        range_sell_rsi=70.0,
+        range_threshold=0.50,
+        reward_to_risk=1.4,
+        atr_multiplier=1.3,
+        note="thinner_hours_more_selective",
+    )

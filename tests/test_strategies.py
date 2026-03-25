@@ -4,12 +4,16 @@ import pytest
 
 from trading_bot.strategies import (
     HTFState,
+    TradingSession,
     add_indicators,
     add_ltf_features,
     get_htf_state_series,
     get_htf_policy,
     get_latest_htf_signal,
     get_latest_ltf_signal,
+    get_session_profile,
+    get_trade_decision,
+    get_trading_session,
     htf_allows_ltf_trade,
 )
 
@@ -110,7 +114,7 @@ def test_get_htf_policy_matches_four_state_rules() -> None:
 
     assert (bullish.allow_long, bullish.allow_short, bullish.frequency_divisor) == (True, False, 1)
     assert (bearish.allow_long, bearish.allow_short, bearish.frequency_divisor) == (False, True, 1)
-    assert (sideways.allow_long, sideways.allow_short, sideways.frequency_divisor) == (True, True, 3)
+    assert (sideways.allow_long, sideways.allow_short, sideways.frequency_divisor) == (True, True, 1)
     assert (volatile.allow_long, volatile.allow_short, volatile.frequency_divisor) == (False, False, 0)
 
 
@@ -154,7 +158,7 @@ def test_get_latest_htf_signal_detects_volatile_state() -> None:
 
 def test_htf_allows_ltf_trade_respects_sideways_frequency_control() -> None:
     assert htf_allows_ltf_trade(HTFState.SIDEWAYS, "bullish", signal_index=0) is True
-    assert htf_allows_ltf_trade(HTFState.SIDEWAYS, "bearish", signal_index=1) is False
+    assert htf_allows_ltf_trade(HTFState.SIDEWAYS, "bearish", signal_index=1) is True
     assert htf_allows_ltf_trade(HTFState.BULLISH, "bearish", signal_index=0) is False
     assert htf_allows_ltf_trade(HTFState.VOLATILE, "bullish", signal_index=0) is False
 
@@ -177,3 +181,56 @@ def test_get_htf_state_series_projects_states_to_ltf_index() -> None:
 
     assert len(states) == len(df)
     assert set(states.unique()).issubset({state.value for state in HTFState})
+
+
+def test_get_trading_session_and_profile_are_deterministic() -> None:
+    asia = pd.Timestamp("2025-01-01 02:00:00")
+    london = pd.Timestamp("2025-01-01 09:00:00")
+    new_york = pd.Timestamp("2025-01-01 14:00:00")
+    off_hours = pd.Timestamp("2025-01-01 21:00:00")
+
+    assert get_trading_session(asia) is TradingSession.ASIA
+    assert get_trading_session(london) is TradingSession.LONDON
+    assert get_trading_session(new_york) is TradingSession.NEW_YORK
+    assert get_trading_session(off_hours) is TradingSession.OFF_HOURS
+    assert get_session_profile(TradingSession.LONDON).note == "most_active_hfm_gold_session"
+
+
+def test_get_trade_decision_uses_sideways_range_logic() -> None:
+    rows = 250
+    base = np.full(rows, 100.0)
+    close = pd.Series(base)
+    close.iloc[-1] = 99.0
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": close + 1.0,
+            "low": close - 1.0,
+            "close": close,
+        },
+        index=pd.date_range("2025-01-01", periods=rows, freq="15min"),
+    )
+
+    decision = get_trade_decision(df, htf_state=HTFState.SIDEWAYS.value)
+
+    assert decision.strategy_mode == "range_mean_reversion"
+    assert decision.reward_to_risk <= 1.5
+
+
+def test_get_trade_decision_blocks_trade_when_htf_is_volatile() -> None:
+    rows = 250
+    close = pd.Series(np.linspace(100.0, 150.0, rows))
+    df = pd.DataFrame(
+        {
+            "open": close - 0.2,
+            "high": close + 0.6,
+            "low": close - 0.6,
+            "close": close,
+        },
+        index=pd.date_range("2025-01-01", periods=rows, freq="15min"),
+    )
+
+    decision = get_trade_decision(df, htf_state=HTFState.VOLATILE.value)
+
+    assert decision.tradable is False
+    assert decision.reason == "htf_volatile"

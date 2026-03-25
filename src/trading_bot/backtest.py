@@ -13,8 +13,8 @@ from trading_bot.strategies import (
     DEFAULT_STRUCTURE_LOOKBACK,
     DEFAULT_LTF_WEIGHTS,
     add_ltf_features,
+    get_trade_decision,
     get_htf_state_series,
-    htf_allows_ltf_trade,
 )
 
 
@@ -30,6 +30,8 @@ class BacktestTrade:
     exit_reason: str
     transaction_cost: float
     htf_state: str | None = None
+    session: str | None = None
+    strategy_mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -61,6 +63,8 @@ class _OpenPosition:
     entry_time: pd.Timestamp
     risk_amount: float
     htf_state: str | None = None
+    session: str | None = None
+    strategy_mode: str | None = None
 
 
 def _resolve_exit(
@@ -127,6 +131,8 @@ def _resolve_exit(
         exit_reason=reason,
         transaction_cost=transaction_cost,
         htf_state=position.htf_state,
+        session=position.session,
+        strategy_mode=position.strategy_mode,
     )
 
 
@@ -174,8 +180,6 @@ def run_ltf_backtest(
     trades: list[BacktestTrade] = []
     open_position: _OpenPosition | None = None
     warmup_bars = max(200, structure_lookback)
-    signal_counter = 0
-
     for index in range(warmup_bars + 1, len(feature_frame)):
         current_row = feature_frame.iloc[index]
         current_time = feature_frame.index[index]
@@ -196,27 +200,22 @@ def run_ltf_backtest(
         if open_position is not None:
             continue
 
-        signal_row = feature_frame.iloc[index - 1]
-        atr_ratio = float(signal_row["atr_ratio"])
-        score = float(signal_row["ltf_score"])
-
-        if atr_ratio < atr_floor_ratio:
-            continue
-
-        if score >= threshold:
-            side = "long"
-            ltf_bias = "bullish"
-        elif score <= -threshold:
-            side = "short"
-            ltf_bias = "bearish"
-        else:
-            continue
-
-        signal_counter += 1
+        signal_slice = feature_frame.iloc[:index]
         htf_state = str(htf_states.iloc[index - 1]) if htf_states is not None else None
-        if use_htf_filter and htf_state is not None:
-            if not htf_allows_ltf_trade(htf_state, ltf_bias, signal_index=signal_counter - 1):
-                continue
+        decision = get_trade_decision(
+            signal_slice,
+            timestamp=feature_frame.index[index - 1],
+            htf_state=htf_state,
+            threshold=threshold,
+            atr_floor_ratio=atr_floor_ratio,
+            structure_lookback=structure_lookback,
+            weights=weights,
+        )
+        if not decision.tradable:
+            continue
+
+        signal_row = feature_frame.iloc[index - 1]
+        side = "long" if decision.bias == "bullish" else "short"
 
         trade_plan = build_trade_plan(
             side=side,
@@ -224,14 +223,16 @@ def run_ltf_backtest(
             atr_value=float(signal_row["atr_14"]),
             account_balance=balance,
             risk_fraction=risk_fraction,
-            atr_multiplier=atr_multiplier,
-            reward_to_risk=reward_to_risk,
+            atr_multiplier=decision.atr_multiplier,
+            reward_to_risk=decision.reward_to_risk,
         )
         open_position = _OpenPosition(
             trade_plan=trade_plan,
             entry_time=current_time,
             risk_amount=trade_plan.risk_amount,
             htf_state=htf_state,
+            session=decision.session.value,
+            strategy_mode=decision.strategy_mode,
         )
 
         closed_trade = _resolve_exit(
@@ -268,6 +269,8 @@ def run_ltf_backtest(
                 exit_reason="end_of_data",
                 transaction_cost=transaction_cost,
                 htf_state=open_position.htf_state,
+                session=open_position.session,
+                strategy_mode=open_position.strategy_mode,
             )
         )
         balance += pnl
@@ -450,6 +453,8 @@ def backtest_trades_to_frame(
         "entry_time",
         "exit_time",
         "side",
+        "session",
+        "strategy_mode",
         "entry_price",
         "exit_price",
         "pnl",
@@ -468,6 +473,8 @@ def backtest_trades_to_frame(
                 "entry_time": trade.entry_time,
                 "exit_time": trade.exit_time,
                 "side": trade.side,
+                "session": trade.session,
+                "strategy_mode": trade.strategy_mode,
                 "entry_price": trade.entry_price,
                 "exit_price": trade.exit_price,
                 "pnl": trade.pnl,
