@@ -68,6 +68,7 @@ class SessionProfile:
     trend_threshold_multiplier: float
     atr_floor_multiplier: float
     sideways_enabled: bool
+    sideways_max_ema_spread_ratio: float
     range_edge: float
     range_buy_rsi: float
     range_sell_rsi: float
@@ -360,7 +361,7 @@ def get_trade_decision(
 
         range_position = float(latest["range_position"])
         rsi_value = float(latest["rsi_14"])
-        ema_neutral = float(latest["ema_spread_ratio"]) <= 0.0025
+        ema_neutral = float(latest["ema_spread_ratio"]) <= profile.sideways_max_ema_spread_ratio
 
         long_edge = max(0.0, (profile.range_edge - range_position) / profile.range_edge)
         short_edge = max(
@@ -626,6 +627,7 @@ def get_session_profile(session: TradingSession | str) -> SessionProfile:
             trend_threshold_multiplier=1.10,
             atr_floor_multiplier=1.05,
             sideways_enabled=False,
+            sideways_max_ema_spread_ratio=0.0018,
             range_edge=0.15,
             range_buy_rsi=35.0,
             range_sell_rsi=65.0,
@@ -640,6 +642,7 @@ def get_session_profile(session: TradingSession | str) -> SessionProfile:
             trend_threshold_multiplier=0.95,
             atr_floor_multiplier=1.00,
             sideways_enabled=False,
+            sideways_max_ema_spread_ratio=0.0018,
             range_edge=0.20,
             range_buy_rsi=40.0,
             range_sell_rsi=60.0,
@@ -651,22 +654,24 @@ def get_session_profile(session: TradingSession | str) -> SessionProfile:
     if normalized_session is TradingSession.NEW_YORK:
         return SessionProfile(
             session=normalized_session,
-            trend_threshold_multiplier=1.08,
-            atr_floor_multiplier=1.10,
+            trend_threshold_multiplier=1.14,
+            atr_floor_multiplier=1.12,
             sideways_enabled=True,
-            range_edge=0.18,
-            range_buy_rsi=38.0,
-            range_sell_rsi=62.0,
-            range_threshold=0.46,
+            sideways_max_ema_spread_ratio=0.0016,
+            range_edge=0.14,
+            range_buy_rsi=35.0,
+            range_sell_rsi=65.0,
+            range_threshold=0.55,
             reward_to_risk=1.9,
             atr_multiplier=1.5,
-            note="active_us_session_selective_trend_and_range",
+            note="active_us_session_tighter_trend_and_range",
         )
     return SessionProfile(
         session=normalized_session,
         trend_threshold_multiplier=1.20,
         atr_floor_multiplier=1.20,
         sideways_enabled=False,
+        sideways_max_ema_spread_ratio=0.0015,
         range_edge=0.10,
         range_buy_rsi=30.0,
         range_sell_rsi=70.0,

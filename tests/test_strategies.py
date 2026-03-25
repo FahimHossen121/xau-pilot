@@ -195,7 +195,10 @@ def test_get_trading_session_and_profile_are_deterministic() -> None:
     assert get_trading_session(off_hours) is TradingSession.OFF_HOURS
     assert get_session_profile(TradingSession.ASIA).sideways_enabled is False
     assert get_session_profile(TradingSession.LONDON).sideways_enabled is False
-    assert get_session_profile(TradingSession.NEW_YORK).sideways_enabled is True
+    new_york_profile = get_session_profile(TradingSession.NEW_YORK)
+    assert new_york_profile.sideways_enabled is True
+    assert new_york_profile.range_threshold == 0.55
+    assert new_york_profile.sideways_max_ema_spread_ratio == 0.0016
 
 
 def test_get_trade_decision_uses_sideways_range_logic() -> None:
