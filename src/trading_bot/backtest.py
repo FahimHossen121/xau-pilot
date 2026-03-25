@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 
 import pandas as pd
 
@@ -52,6 +53,12 @@ class BacktestResult:
     average_win: float
     average_loss: float
     max_drawdown_pct: float
+    max_daily_loss_fraction: float
+    cooldown_bars_after_loss: int
+    loss_streak_for_cooldown: int
+    cooldown_events: int
+    daily_loss_lockout_days: int
+    one_open_position_rule: bool
     used_htf_filter: bool
     htf_rule: str | None
     trades: list[BacktestTrade]
@@ -65,6 +72,32 @@ class _OpenPosition:
     htf_state: str | None = None
     session: str | None = None
     strategy_mode: str | None = None
+
+
+@dataclass(frozen=True)
+class _TradeAggregate:
+    trade_count: int
+    win_count: int
+    loss_count: int
+    win_rate: float
+    total_pnl: float
+    total_r_multiple: float
+    average_r_multiple: float
+    gross_profit: float
+    gross_loss: float
+    profit_factor: float
+    average_win: float
+    average_loss: float
+
+
+@dataclass(frozen=True)
+class _RiskRuntimeUpdate:
+    balance: float
+    day_realized_pnl: float
+    day_locked: bool
+    consecutive_losses: int
+    cooldown_until_index: int
+    cooldown_events: int
 
 
 def _resolve_exit(
@@ -136,6 +169,92 @@ def _resolve_exit(
     )
 
 
+def _register_closed_trade(
+    *,
+    closed_trade: BacktestTrade,
+    trades: list[BacktestTrade],
+    balance: float,
+    day_realized_pnl: float,
+    day_start_balance: float,
+    current_day_value: date,
+    lockout_days: set[date],
+    consecutive_losses: int,
+    index: int,
+    cooldown_until_index: int,
+    cooldown_bars_after_loss: int,
+    loss_streak_for_cooldown: int,
+    cooldown_events: int,
+    max_daily_loss_fraction: float,
+) -> _RiskRuntimeUpdate:
+    trades.append(closed_trade)
+    balance += closed_trade.pnl
+    day_realized_pnl += closed_trade.pnl
+
+    if closed_trade.pnl < 0:
+        consecutive_losses += 1
+        if (
+            cooldown_bars_after_loss > 0
+            and consecutive_losses >= loss_streak_for_cooldown
+        ):
+            cooldown_until_index = max(
+                cooldown_until_index,
+                index + cooldown_bars_after_loss,
+            )
+            cooldown_events += 1
+            consecutive_losses = 0
+    else:
+        consecutive_losses = 0
+
+    day_locked = False
+    daily_loss_limit = day_start_balance * max_daily_loss_fraction
+    if day_realized_pnl <= -daily_loss_limit:
+        day_locked = True
+        lockout_days.add(current_day_value)
+
+    return _RiskRuntimeUpdate(
+        balance=balance,
+        day_realized_pnl=day_realized_pnl,
+        day_locked=day_locked,
+        consecutive_losses=consecutive_losses,
+        cooldown_until_index=cooldown_until_index,
+        cooldown_events=cooldown_events,
+    )
+
+
+def _summarize_trades(trades: list[BacktestTrade]) -> _TradeAggregate:
+    trade_count = len(trades)
+    win_count = sum(1 for trade in trades if trade.pnl > 0)
+    loss_count = sum(1 for trade in trades if trade.pnl < 0)
+    total_pnl = sum(trade.pnl for trade in trades)
+    total_r_multiple = sum(trade.r_multiple for trade in trades)
+    average_r_multiple = (total_r_multiple / trade_count) if trade_count else 0.0
+    win_rate = (win_count / trade_count) if trade_count else 0.0
+    gross_profit = sum(trade.pnl for trade in trades if trade.pnl > 0)
+    gross_loss = sum(trade.pnl for trade in trades if trade.pnl < 0)
+    profit_factor = (
+        gross_profit / abs(gross_loss)
+        if gross_loss < 0
+        else (float("inf") if gross_profit > 0 else 0.0)
+    )
+    average_win = (gross_profit / win_count) if win_count else 0.0
+    average_loss = (gross_loss / loss_count) if loss_count else 0.0
+
+    return _TradeAggregate(
+        trade_count=trade_count,
+        win_count=win_count,
+        loss_count=loss_count,
+        win_rate=win_rate,
+        total_pnl=total_pnl,
+        total_r_multiple=total_r_multiple,
+        average_r_multiple=average_r_multiple,
+        gross_profit=gross_profit,
+        gross_loss=gross_loss,
+        profit_factor=profit_factor,
+        average_win=average_win,
+        average_loss=average_loss,
+    )
+
+
 def run_ltf_backtest(
     df: pd.DataFrame,
     *,
@@ -148,6 +267,9 @@ def run_ltf_backtest(
     reward_to_risk: float = 2.0,
     spread: float = 0.0,
     slippage: float = 0.0,
+    max_daily_loss_fraction: float = 0.03,
+    cooldown_bars_after_loss: int = 3,
+    loss_streak_for_cooldown: int = 2,
     use_htf_filter: bool = False,
     htf_rule: str = "4H",
     htf_volatile_atr_ratio: float = 0.012,
@@ -160,6 +282,12 @@ def run_ltf_backtest(
         raise ValueError("spread must be non-negative.")
     if slippage < 0:
         raise ValueError("slippage must be non-negative.")
+    if not 0 < max_daily_loss_fraction <= 1:
+        raise ValueError("max_daily_loss_fraction must be between 0 and 1.")
+    if cooldown_bars_after_loss < 0:
+        raise ValueError("cooldown_bars_after_loss must be non-negative.")
+    if loss_streak_for_cooldown < 1:
+        raise ValueError("loss_streak_for_cooldown must be at least 1.")
 
     feature_frame = add_ltf_features(
         df,
@@ -179,10 +307,25 @@ def run_ltf_backtest(
     balance = initial_balance
     trades: list[BacktestTrade] = []
     open_position: _OpenPosition | None = None
+    current_day: date | None = None
+    day_start_balance = initial_balance
+    day_realized_pnl = 0.0
+    day_locked = False
+    lockout_days: set[date] = set()
+    consecutive_losses = 0
+    cooldown_until_index = -1
+    cooldown_events = 0
     warmup_bars = max(200, structure_lookback)
     for index in range(warmup_bars + 1, len(feature_frame)):
         current_row = feature_frame.iloc[index]
         current_time = feature_frame.index[index]
+        current_day_value = current_time.date()
+
+        if current_day != current_day_value:
+            current_day = current_day_value
+            day_start_balance = balance
+            day_realized_pnl = 0.0
+            day_locked = False
 
         if open_position is not None:
             closed_trade = _resolve_exit(
@@ -193,11 +336,35 @@ def run_ltf_backtest(
                 slippage=slippage,
             )
             if closed_trade is not None:
-                trades.append(closed_trade)
-                balance += closed_trade.pnl
+                runtime = _register_closed_trade(
+                    closed_trade=closed_trade,
+                    trades=trades,
+                    balance=balance,
+                    day_realized_pnl=day_realized_pnl,
+                    day_start_balance=day_start_balance,
+                    current_day_value=current_day_value,
+                    lockout_days=lockout_days,
+                    consecutive_losses=consecutive_losses,
+                    index=index,
+                    cooldown_until_index=cooldown_until_index,
+                    cooldown_bars_after_loss=cooldown_bars_after_loss,
+                    loss_streak_for_cooldown=loss_streak_for_cooldown,
+                    cooldown_events=cooldown_events,
+                    max_daily_loss_fraction=max_daily_loss_fraction,
+                )
+                balance = runtime.balance
+                day_realized_pnl = runtime.day_realized_pnl
+                day_locked = runtime.day_locked
+                consecutive_losses = runtime.consecutive_losses
+                cooldown_until_index = runtime.cooldown_until_index
+                cooldown_events = runtime.cooldown_events
                 open_position = None
 
         if open_position is not None:
+            continue
+        if day_locked:
+            continue
+        if index <= cooldown_until_index:
             continue
 
         signal_slice = feature_frame.iloc[:index]
@@ -243,8 +410,28 @@ def run_ltf_backtest(
             slippage=slippage,
         )
         if closed_trade is not None:
-            trades.append(closed_trade)
-            balance += closed_trade.pnl
+            runtime = _register_closed_trade(
+                closed_trade=closed_trade,
+                trades=trades,
+                balance=balance,
+                day_realized_pnl=day_realized_pnl,
+                day_start_balance=day_start_balance,
+                current_day_value=current_day_value,
+                lockout_days=lockout_days,
+                consecutive_losses=consecutive_losses,
+                index=index,
+                cooldown_until_index=cooldown_until_index,
+                cooldown_bars_after_loss=cooldown_bars_after_loss,
+                loss_streak_for_cooldown=loss_streak_for_cooldown,
+                cooldown_events=cooldown_events,
+                max_daily_loss_fraction=max_daily_loss_fraction,
+            )
+            balance = runtime.balance
+            day_realized_pnl = runtime.day_realized_pnl
+            day_locked = runtime.day_locked
+            consecutive_losses = runtime.consecutive_losses
+            cooldown_until_index = runtime.cooldown_until_index
+            cooldown_events = runtime.cooldown_events
             open_position = None
 
     if open_position is not None:
@@ -275,22 +462,8 @@ def run_ltf_backtest(
         )
         balance += pnl
 
-    trade_count = len(trades)
-    win_count = sum(1 for trade in trades if trade.pnl > 0)
-    loss_count = sum(1 for trade in trades if trade.pnl < 0)
+    aggregate = _summarize_trades(trades)
     total_pnl = balance - initial_balance
-    total_r_multiple = sum(trade.r_multiple for trade in trades)
-    average_r_multiple = (total_r_multiple / trade_count) if trade_count else 0.0
-    win_rate = (win_count / trade_count) if trade_count else 0.0
-    gross_profit = sum(trade.pnl for trade in trades if trade.pnl > 0)
-    gross_loss = sum(trade.pnl for trade in trades if trade.pnl < 0)
-    profit_factor = (
-        gross_profit / abs(gross_loss)
-        if gross_loss < 0
-        else (float("inf") if gross_profit > 0 else 0.0)
-    )
-    average_win = (gross_profit / win_count) if win_count else 0.0
-    average_loss = (gross_loss / loss_count) if loss_count else 0.0
 
     running_balance = initial_balance
     peak_balance = initial_balance
@@ -308,18 +481,24 @@ def run_ltf_backtest(
         final_balance=balance,
         total_pnl=total_pnl,
         total_return_pct=(total_pnl / initial_balance) if initial_balance else 0.0,
-        trade_count=trade_count,
-        win_count=win_count,
-        loss_count=loss_count,
-        win_rate=win_rate,
-        average_r_multiple=average_r_multiple,
-        total_r_multiple=total_r_multiple,
-        gross_profit=gross_profit,
-        gross_loss=gross_loss,
-        profit_factor=profit_factor,
-        average_win=average_win,
-        average_loss=average_loss,
+        trade_count=aggregate.trade_count,
+        win_count=aggregate.win_count,
+        loss_count=aggregate.loss_count,
+        win_rate=aggregate.win_rate,
+        average_r_multiple=aggregate.average_r_multiple,
+        total_r_multiple=aggregate.total_r_multiple,
+        gross_profit=aggregate.gross_profit,
+        gross_loss=aggregate.gross_loss,
+        profit_factor=aggregate.profit_factor,
+        average_win=aggregate.average_win,
+        average_loss=aggregate.average_loss,
         max_drawdown_pct=max_drawdown_pct,
+        max_daily_loss_fraction=max_daily_loss_fraction,
+        cooldown_bars_after_loss=cooldown_bars_after_loss,
+        loss_streak_for_cooldown=loss_streak_for_cooldown,
+        cooldown_events=cooldown_events,
+        daily_loss_lockout_days=len(lockout_days),
+        one_open_position_rule=True,
         used_htf_filter=use_htf_filter,
         htf_rule=htf_rule if use_htf_filter else None,
         trades=trades,
@@ -340,6 +519,9 @@ def run_mt5_ltf_backtest(
     reward_to_risk: float = 2.0,
     spread: float = 0.0,
     slippage: float = 0.0,
+    max_daily_loss_fraction: float = 0.03,
+    cooldown_bars_after_loss: int = 3,
+    loss_streak_for_cooldown: int = 2,
     drop_incomplete_last_candle: bool = True,
     use_htf_filter: bool = False,
     htf_rule: str = "4H",
@@ -364,6 +546,9 @@ def run_mt5_ltf_backtest(
         reward_to_risk=reward_to_risk,
         spread=spread,
         slippage=slippage,
+        max_daily_loss_fraction=max_daily_loss_fraction,
+        cooldown_bars_after_loss=cooldown_bars_after_loss,
+        loss_streak_for_cooldown=loss_streak_for_cooldown,
         use_htf_filter=use_htf_filter,
         htf_rule=htf_rule,
         htf_volatile_atr_ratio=htf_volatile_atr_ratio,
@@ -391,6 +576,12 @@ def format_backtest_summary(result: BacktestResult) -> str:
         f"Average win: {result.average_win:.2f}",
         f"Average loss: {result.average_loss:.2f}",
         f"Max drawdown: {result.max_drawdown_pct * 100:.2f}%",
+        f"Max daily loss limit: {result.max_daily_loss_fraction * 100:.2f}%",
+        f"Cooldown bars after loss streak: {result.cooldown_bars_after_loss}",
+        f"Loss streak for cooldown: {result.loss_streak_for_cooldown}",
+        f"Cooldown events: {result.cooldown_events}",
+        f"Daily lockout days: {result.daily_loss_lockout_days}",
+        f"One open position rule: {result.one_open_position_rule}",
         f"HTF filter enabled: {result.used_htf_filter}",
         f"HTF rule: {result.htf_rule or 'none'}",
     ]
@@ -417,6 +608,12 @@ def backtest_result_to_row(
         "risk_fraction": risk_fraction,
         "spread": spread,
         "slippage": slippage,
+        "max_daily_loss_fraction": result.max_daily_loss_fraction,
+        "cooldown_bars_after_loss": result.cooldown_bars_after_loss,
+        "loss_streak_for_cooldown": result.loss_streak_for_cooldown,
+        "cooldown_events": result.cooldown_events,
+        "daily_loss_lockout_days": result.daily_loss_lockout_days,
+        "one_open_position_rule": result.one_open_position_rule,
         "used_htf_filter": result.used_htf_filter,
         "htf_rule": result.htf_rule,
         "initial_balance": result.initial_balance,
@@ -485,3 +682,84 @@ def backtest_trades_to_frame(
             }
         )
     return pd.DataFrame(rows, columns=columns)
+
+
+def backtest_session_stats_to_frame(
+    result: BacktestResult,
+    *,
+    scenario_name: str,
+    symbol: str,
+    timeframe: str,
+) -> pd.DataFrame:
+    """Aggregate executed trades by session and strategy mode for CSV export."""
+    rows: list[dict[str, float | int | str | bool | None]] = []
+    trades_frame = backtest_trades_to_frame(
+        result,
+        scenario_name=scenario_name,
+        symbol=symbol,
+        timeframe=timeframe,
+    )
+    if trades_frame.empty:
+        return pd.DataFrame(
+            columns=[
+                "scenario_name",
+                "symbol",
+                "timeframe",
+                "session",
+                "strategy_mode",
+                "trade_count",
+                "win_count",
+                "loss_count",
+                "win_rate",
+                "total_pnl",
+                "total_r_multiple",
+                "average_r_multiple",
+                "profit_factor",
+                "average_win",
+                "average_loss",
+            ]
+        )
+
+    for (session, strategy_mode), group in trades_frame.groupby(
+        ["session", "strategy_mode"],
+        dropna=False,
+    ):
+        trade_subset = [
+            BacktestTrade(
+                entry_time=pd.Timestamp(row.entry_time),
+                exit_time=pd.Timestamp(row.exit_time),
+                side=str(row.side),
+                entry_price=float(row.entry_price),
+                exit_price=float(row.exit_price),
+                pnl=float(row.pnl),
+                r_multiple=float(row.r_multiple),
+                exit_reason=str(row.exit_reason),
+                transaction_cost=float(row.transaction_cost),
+                htf_state=None if pd.isna(row.htf_state) else str(row.htf_state),
+                session=None if pd.isna(row.session) else str(row.session),
+                strategy_mode=None if pd.isna(row.strategy_mode) else str(row.strategy_mode),
+            )
+            for row in group.itertuples(index=False)
+        ]
+        aggregate = _summarize_trades(trade_subset)
+        rows.append(
+            {
+                "scenario_name": scenario_name,
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "session": session,
+                "strategy_mode": strategy_mode,
+                "trade_count": aggregate.trade_count,
+                "win_count": aggregate.win_count,
+                "loss_count": aggregate.loss_count,
+                "win_rate": aggregate.win_rate,
+                "total_pnl": aggregate.total_pnl,
+                "total_r_multiple": aggregate.total_r_multiple,
+                "average_r_multiple": aggregate.average_r_multiple,
+                "profit_factor": aggregate.profit_factor,
+                "average_win": aggregate.average_win,
+                "average_loss": aggregate.average_loss,
+            }
+        )
+
+    return pd.DataFrame(rows)

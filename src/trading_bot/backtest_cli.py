@@ -65,6 +65,24 @@ def build_parser() -> argparse.ArgumentParser:
         default="4H",
         help="Pandas resample rule used to derive higher-timeframe technical states",
     )
+    parser.add_argument(
+        "--max-daily-loss",
+        type=float,
+        default=None,
+        help="Daily realized loss fraction that blocks new trades for the rest of the day",
+    )
+    parser.add_argument(
+        "--cooldown-bars",
+        type=int,
+        default=3,
+        help="Number of bars to wait after triggering a loss-streak cooldown",
+    )
+    parser.add_argument(
+        "--cooldown-loss-streak",
+        type=int,
+        default=2,
+        help="Consecutive losing trades required before a cooldown starts",
+    )
     return parser
 
 
@@ -81,6 +99,11 @@ def main() -> None:
         risk_fraction=args.risk if args.risk is not None else settings.max_risk_per_trade,
         spread=args.spread,
         slippage=args.slippage,
+        max_daily_loss_fraction=(
+            args.max_daily_loss if args.max_daily_loss is not None else settings.max_daily_loss
+        ),
+        cooldown_bars_after_loss=args.cooldown_bars,
+        loss_streak_for_cooldown=args.cooldown_loss_streak,
         use_htf_filter=args.use_htf_filter,
         htf_rule=args.htf_rule,
     )
