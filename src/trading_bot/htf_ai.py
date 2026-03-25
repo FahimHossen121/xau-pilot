@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 from typing import Protocol
+from xml.etree import ElementTree
 
 import httpx
 import pandas as pd
@@ -96,6 +97,19 @@ class NewsProvider(Protocol):
         max_results_per_query: int,
     ) -> list[NewsArticle]:
         ...
+
+
+class NoopNewsProvider:
+    def gather_context(
+        self,
+        *,
+        symbol: str,
+        technical_snapshot: TechnicalHTFSnapshot,
+        freshness: str,
+        max_results_per_query: int,
+    ) -> list[NewsArticle]:
+        del symbol, technical_snapshot, freshness, max_results_per_query
+        return []
 
 
 class MacroAnalyzer(Protocol):
@@ -277,6 +291,110 @@ class BraveNewsProvider:
                     continue
                 seen_urls.add(article.url)
                 combined.append(article)
+        return combined
+
+
+class RssNewsProvider:
+    def __init__(
+        self,
+        *,
+        feed_urls: tuple[str, ...],
+        timeout_seconds: float = 20.0,
+    ) -> None:
+        self._feed_urls = feed_urls
+        self._timeout_seconds = timeout_seconds
+
+    @staticmethod
+    def _extract_channel_items(root: ElementTree.Element) -> list[ElementTree.Element]:
+        channel = root.find("./channel")
+        if channel is not None:
+            return list(channel.findall("./item"))
+        return list(root.findall(".//item"))
+
+    @staticmethod
+    def _extract_atom_entries(root: ElementTree.Element) -> list[ElementTree.Element]:
+        return list(root.findall(".//{http://www.w3.org/2005/Atom}entry"))
+
+    @staticmethod
+    def _clean_text(value: str | None) -> str:
+        return (value or "").strip()
+
+    def _parse_rss_items(self, root: ElementTree.Element) -> list[NewsArticle]:
+        articles: list[NewsArticle] = []
+        for item in self._extract_channel_items(root):
+            title = self._clean_text(item.findtext("title"))
+            link = self._clean_text(item.findtext("link"))
+            description = self._clean_text(item.findtext("description"))
+            published_at = self._clean_text(item.findtext("pubDate")) or None
+            source = self._clean_text(item.findtext("source")) or "rss"
+            if title and link:
+                articles.append(
+                    NewsArticle(
+                        title=title,
+                        url=link,
+                        source=source,
+                        published_at=published_at,
+                        snippet=description,
+                    )
+                )
+        return articles
+
+    def _parse_atom_entries(self, root: ElementTree.Element) -> list[NewsArticle]:
+        articles: list[NewsArticle] = []
+        for entry in self._extract_atom_entries(root):
+            title = self._clean_text(entry.findtext("{http://www.w3.org/2005/Atom}title"))
+            summary = self._clean_text(entry.findtext("{http://www.w3.org/2005/Atom}summary"))
+            published_at = (
+                self._clean_text(entry.findtext("{http://www.w3.org/2005/Atom}updated")) or None
+            )
+            source = "rss"
+            link = ""
+            for link_element in entry.findall("{http://www.w3.org/2005/Atom}link"):
+                href = self._clean_text(link_element.attrib.get("href"))
+                if href:
+                    link = href
+                    break
+            if title and link:
+                articles.append(
+                    NewsArticle(
+                        title=title,
+                        url=link,
+                        source=source,
+                        published_at=published_at,
+                        snippet=summary,
+                    )
+                )
+        return articles
+
+    def _fetch_feed(self, url: str) -> list[NewsArticle]:
+        response = httpx.get(url, timeout=self._timeout_seconds)
+        response.raise_for_status()
+        root = ElementTree.fromstring(response.text)
+        articles = self._parse_rss_items(root)
+        if articles:
+            return articles
+        return self._parse_atom_entries(root)
+
+    def gather_context(
+        self,
+        *,
+        symbol: str,
+        technical_snapshot: TechnicalHTFSnapshot,
+        freshness: str,
+        max_results_per_query: int,
+    ) -> list[NewsArticle]:
+        del symbol, technical_snapshot, freshness
+
+        combined: list[NewsArticle] = []
+        seen_urls: set[str] = set()
+        for feed_url in self._feed_urls:
+            for article in self._fetch_feed(feed_url):
+                if article.url in seen_urls:
+                    continue
+                seen_urls.add(article.url)
+                combined.append(article)
+                if len(combined) >= max_results_per_query:
+                    return combined
         return combined
 
 
@@ -542,13 +660,24 @@ class HTFAIController:
 
 
 def build_live_controller(settings: Settings) -> HTFAIController:
-    if not settings.brave_api_key:
-        raise ValueError("BRAVE_API_KEY must be set to use the HTF AI layer.")
     if not settings.gemini_api_key:
         raise ValueError("GEMINI_API_KEY must be set to use the HTF AI layer.")
 
+    if settings.news_provider == "brave":
+        if not settings.brave_api_key:
+            raise ValueError("BRAVE_API_KEY must be set when NEWS_PROVIDER=brave.")
+        news_provider: NewsProvider = BraveNewsProvider(api_key=settings.brave_api_key)
+    elif settings.news_provider == "rss":
+        news_provider = (
+            RssNewsProvider(feed_urls=settings.rss_feed_urls)
+            if settings.rss_feed_urls
+            else NoopNewsProvider()
+        )
+    else:
+        news_provider = NoopNewsProvider()
+
     return HTFAIController(
-        news_provider=BraveNewsProvider(api_key=settings.brave_api_key),
+        news_provider=news_provider,
         macro_analyzer=GeminiMacroAnalyzer(
             api_key=settings.gemini_api_key,
             model=settings.gemini_model,

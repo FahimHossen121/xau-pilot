@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from trading_bot.config import Settings
 from trading_bot.htf_ai import (
     AIMacroAssessment,
     HTFAIController,
@@ -12,6 +13,7 @@ from trading_bot.htf_ai import (
     NewsArticle,
     TechnicalHTFSnapshot,
     build_technical_htf_snapshot,
+    build_live_controller,
     load_htf_ai_state,
     save_htf_ai_state,
 )
@@ -261,3 +263,30 @@ def test_htf_ai_state_roundtrip() -> None:
         assert loaded.ai_summary == "Bullish remains intact."
     finally:
         path.unlink(missing_ok=True)
+
+
+def test_build_live_controller_allows_free_none_provider() -> None:
+    settings = Settings(
+        app_mode="paper",
+        log_level="INFO",
+        timezone="UTC",
+        symbol="XAUUSD",
+        max_risk_per_trade=0.01,
+        max_daily_loss=0.03,
+        mt5_login=None,
+        mt5_password=None,
+        mt5_server=None,
+        news_provider="none",
+        rss_feed_urls=(),
+        brave_api_key=None,
+        gemini_api_key="test-gemini-key",
+        gemini_model="gemini-1.5-pro",
+        ai_htf_refresh_hours=1,
+        brave_news_freshness="pd",
+        brave_news_results_per_query=5,
+        enable_trading=False,
+    )
+
+    controller = build_live_controller(settings)
+
+    assert isinstance(controller, HTFAIController)

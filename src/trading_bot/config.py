@@ -40,6 +40,13 @@ def _get_optional_int(name: str) -> int | None:
         raise ValueError(f"{name} must be a valid integer.") from exc
 
 
+def _get_csv_list(name: str) -> tuple[str, ...]:
+    raw = _get_str(name)
+    if not raw:
+        return ()
+    return tuple(item.strip() for item in raw.split(",") if item.strip())
+
+
 @dataclass(frozen=True)
 class Settings:
     app_mode: str
@@ -51,6 +58,8 @@ class Settings:
     mt5_login: int | None
     mt5_password: str | None
     mt5_server: str | None
+    news_provider: str
+    rss_feed_urls: tuple[str, ...]
     brave_api_key: str | None
     gemini_api_key: str | None
     gemini_model: str
@@ -77,6 +86,8 @@ class Settings:
             mt5_login=_get_optional_int("MT5_LOGIN"),
             mt5_password=_get_str("MT5_PASSWORD") or None,
             mt5_server=_get_str("MT5_SERVER") or None,
+            news_provider=_get_str("NEWS_PROVIDER", "none").lower(),
+            rss_feed_urls=_get_csv_list("RSS_FEED_URLS"),
             brave_api_key=_get_str("BRAVE_API_KEY") or None,
             gemini_api_key=_get_str("GEMINI_API_KEY") or None,
             gemini_model=_get_str("GEMINI_MODEL", "gemini-1.5-pro"),
@@ -112,3 +123,6 @@ class Settings:
             raise ValueError(
                 "MT5_LOGIN, MT5_PASSWORD, and MT5_SERVER must be set together."
             )
+
+        if self.news_provider not in {"none", "rss", "brave"}:
+            raise ValueError("NEWS_PROVIDER must be one of: none, rss, brave.")

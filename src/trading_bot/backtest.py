@@ -4,9 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
+from pathlib import Path
 
 import pandas as pd
 
+from trading_bot.htf_ai_replay import (
+    build_effective_htf_series,
+    load_ai_state_history,
+    project_ai_state_series,
+)
 from trading_bot.risk import TradePlan, build_trade_plan
 from trading_bot.strategies import (
     DEFAULT_ATR_FLOOR_RATIO,
@@ -69,6 +75,8 @@ class BacktestResult:
     one_open_position_rule: bool
     used_htf_filter: bool
     htf_rule: str | None
+    used_ai_htf_replay: bool
+    ai_replay_path: str | None
     trades: list[BacktestTrade]
 
 
@@ -562,6 +570,7 @@ def run_ltf_backtest(
     use_htf_filter: bool = False,
     htf_rule: str = "4H",
     htf_volatile_atr_ratio: float = 0.012,
+    ai_htf_replay_path: str | Path | None = None,
     weights: dict[str, float] | None = None,
 ) -> BacktestResult:
     """Replay candles, open on the next bar, and exit on stop or TP2."""
@@ -594,6 +603,15 @@ def run_ltf_backtest(
         if use_htf_filter
         else None
     )
+    if ai_htf_replay_path is not None:
+        if not use_htf_filter:
+            raise ValueError("use_htf_filter must be enabled when ai_htf_replay_path is provided.")
+        ai_history = load_ai_state_history(ai_htf_replay_path)
+        ai_states = project_ai_state_series(feature_frame.index, ai_history)
+        htf_states = build_effective_htf_series(
+            technical_states=htf_states,
+            ai_states=ai_states,
+        )
 
     balance = initial_balance
     trades: list[BacktestTrade] = []
@@ -793,6 +811,8 @@ def run_ltf_backtest(
         one_open_position_rule=True,
         used_htf_filter=use_htf_filter,
         htf_rule=htf_rule if use_htf_filter else None,
+        used_ai_htf_replay=ai_htf_replay_path is not None,
+        ai_replay_path=str(ai_htf_replay_path) if ai_htf_replay_path is not None else None,
         trades=trades,
     )
 
@@ -821,6 +841,7 @@ def run_mt5_ltf_backtest(
     use_htf_filter: bool = False,
     htf_rule: str = "4H",
     htf_volatile_atr_ratio: float = 0.012,
+    ai_htf_replay_path: str | Path | None = None,
     weights: dict[str, float] | None = None,
 ) -> BacktestResult:
     """Fetch MT5 candles and run the paper-only LTF replay."""
@@ -852,6 +873,7 @@ def run_mt5_ltf_backtest(
         use_htf_filter=use_htf_filter,
         htf_rule=htf_rule,
         htf_volatile_atr_ratio=htf_volatile_atr_ratio,
+        ai_htf_replay_path=ai_htf_replay_path,
         weights=weights,
     )
 
@@ -890,6 +912,8 @@ def format_backtest_summary(result: BacktestResult) -> str:
         f"One open position rule: {result.one_open_position_rule}",
         f"HTF filter enabled: {result.used_htf_filter}",
         f"HTF rule: {result.htf_rule or 'none'}",
+        f"AI HTF replay enabled: {result.used_ai_htf_replay}",
+        f"AI HTF replay path: {result.ai_replay_path or 'none'}",
     ]
     return "\n".join(lines)
 
@@ -932,6 +956,8 @@ def backtest_result_to_row(
         "break_even_exit_count": result.break_even_exit_count,
         "used_htf_filter": result.used_htf_filter,
         "htf_rule": result.htf_rule,
+        "used_ai_htf_replay": result.used_ai_htf_replay,
+        "ai_replay_path": result.ai_replay_path,
         "initial_balance": result.initial_balance,
         "final_balance": result.final_balance,
         "total_pnl": result.total_pnl,

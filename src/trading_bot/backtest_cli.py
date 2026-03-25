@@ -82,6 +82,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Exclusive end date/time in ISO format, for example 2026-03-26 or 2026-03-25T23:59:59",
     )
+    parser.add_argument(
+        "--ai-htf-replay",
+        default=None,
+        help="Path to a CSV of timestamped AI HTF states for historical replay",
+    )
     return parser
 
 
@@ -111,6 +116,7 @@ def main() -> None:
         end_time=end_time,
         use_htf_filter=True,
         htf_rule=HTF_RULE,
+        ai_htf_replay_path=args.ai_htf_replay,
     )
     print(format_backtest_summary(result))
 

@@ -190,6 +190,8 @@ def test_backtest_export_helpers_build_summary_and_trade_rows() -> None:
     assert summary_row["one_open_position_rule"] is True
     assert "partial_exit_count" in summary_row
     assert "break_even_exit_count" in summary_row
+    assert "used_ai_htf_replay" in summary_row
+    assert "ai_replay_path" in summary_row
     assert "scenario_name" in trades_df.columns
     assert "session" in trades_df.columns
     assert "strategy_mode" in trades_df.columns

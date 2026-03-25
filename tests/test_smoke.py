@@ -16,6 +16,8 @@ ENV_KEYS = [
     "MT5_LOGIN",
     "MT5_PASSWORD",
     "MT5_SERVER",
+    "NEWS_PROVIDER",
+    "RSS_FEED_URLS",
     "BRAVE_API_KEY",
     "BRAVE_NEWS_FRESHNESS",
     "BRAVE_NEWS_RESULTS_PER_QUERY",
@@ -57,6 +59,8 @@ def test_settings_loads_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
                 "MT5_LOGIN=123456",
                 "MT5_PASSWORD=test-password",
                 "MT5_SERVER=HFMarketsGlobal-Demo",
+                "NEWS_PROVIDER=rss",
+                "RSS_FEED_URLS=https://example.com/feed1.xml, https://example.com/feed2.xml",
                 "BRAVE_API_KEY=test-brave-key",
                 "BRAVE_NEWS_FRESHNESS=pw",
                 "BRAVE_NEWS_RESULTS_PER_QUERY=4",
@@ -79,6 +83,11 @@ def test_settings_loads_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.max_daily_loss == 0.05
     assert settings.mt5_login == 123456
     assert settings.mt5_server == "HFMarketsGlobal-Demo"
+    assert settings.news_provider == "rss"
+    assert settings.rss_feed_urls == (
+        "https://example.com/feed1.xml",
+        "https://example.com/feed2.xml",
+    )
     assert settings.brave_api_key == "test-brave-key"
     assert settings.brave_news_freshness == "pw"
     assert settings.brave_news_results_per_query == 4
