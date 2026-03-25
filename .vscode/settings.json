@@ -1,5 +1,10 @@
 {
   "code-runner.runInTerminal": true,
   "code-runner.ignoreSelection": true,
-  "python.terminal.executeInFileDir": true
+  "python.terminal.executeInFileDir": true,
+  "python.defaultInterpreterPath": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+  "python.terminal.activateEnvironment": true,
+  "code-runner.executorMap": {
+    "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe"
+  }
 }

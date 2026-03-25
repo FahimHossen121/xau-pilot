@@ -49,3 +49,6 @@ reports/
 
 # Trading artifacts
 state/
+
+# Local AI prompt scratchpad
+temp.md
