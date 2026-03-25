@@ -4,6 +4,7 @@ from trading_bot.risk import TradePlan
 from trading_bot.strategies import TradeDecision, TradingSession
 
 from trading_bot.backtest import (
+    PARTIAL_50_BE,
     backtest_result_to_row,
     backtest_session_stats_to_frame,
     backtest_trades_to_frame,
@@ -368,7 +369,12 @@ def test_run_ltf_backtest_supports_partial_tp_then_break_even(monkeypatch) -> No
     monkeypatch.setattr("trading_bot.backtest.get_trade_decision", fake_decision)
     monkeypatch.setattr("trading_bot.backtest.build_trade_plan", fake_trade_plan)
 
-    result = run_ltf_backtest(df, spread=0.0, slippage=0.0)
+    result = run_ltf_backtest(
+        df,
+        spread=0.0,
+        slippage=0.0,
+        trade_management=PARTIAL_50_BE,
+    )
 
     assert result.trade_count == 1
     assert result.partial_exit_count == 1
@@ -428,7 +434,12 @@ def test_run_ltf_backtest_supports_partial_tp_then_final_tp(monkeypatch) -> None
     monkeypatch.setattr("trading_bot.backtest.get_trade_decision", fake_decision)
     monkeypatch.setattr("trading_bot.backtest.build_trade_plan", fake_trade_plan)
 
-    result = run_ltf_backtest(df, spread=0.0, slippage=0.0)
+    result = run_ltf_backtest(
+        df,
+        spread=0.0,
+        slippage=0.0,
+        trade_management=PARTIAL_50_BE,
+    )
 
     assert result.trade_count == 1
     assert result.partial_exit_count == 1

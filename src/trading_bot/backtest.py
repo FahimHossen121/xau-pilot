@@ -98,39 +98,43 @@ class TradeManagementConfig:
     trailing_stop_after_tp1: bool
 
 
-DEFAULT_TRADE_MANAGEMENT = TradeManagementConfig(
+PARTIAL_50_BE = TradeManagementConfig(
     name="partial_50_be",
     partial_close_fraction=0.50,
     tp1_stop_offset_r=0.0,
     trailing_stop_after_tp1=False,
 )
 
+PARTIAL_30_BE = TradeManagementConfig(
+    name="partial_30_be",
+    partial_close_fraction=0.30,
+    tp1_stop_offset_r=0.0,
+    trailing_stop_after_tp1=False,
+)
+
+PARTIAL_50_LOCK_0_25R = TradeManagementConfig(
+    name="partial_50_lock_0_25r",
+    partial_close_fraction=0.50,
+    tp1_stop_offset_r=0.25,
+    trailing_stop_after_tp1=False,
+)
+
+NO_PARTIAL_TRAILING_AFTER_1R = TradeManagementConfig(
+    name="no_partial_trailing_after_1r",
+    partial_close_fraction=0.0,
+    tp1_stop_offset_r=0.0,
+    trailing_stop_after_tp1=True,
+)
+
+# The active default follows the best one-month M5/H1 comparison result.
+DEFAULT_TRADE_MANAGEMENT = NO_PARTIAL_TRAILING_AFTER_1R
+
 
 TRADE_MANAGEMENT_VARIANTS = (
-    TradeManagementConfig(
-        name="partial_50_be",
-        partial_close_fraction=0.50,
-        tp1_stop_offset_r=0.0,
-        trailing_stop_after_tp1=False,
-    ),
-    TradeManagementConfig(
-        name="partial_30_be",
-        partial_close_fraction=0.30,
-        tp1_stop_offset_r=0.0,
-        trailing_stop_after_tp1=False,
-    ),
-    TradeManagementConfig(
-        name="partial_50_lock_0_25r",
-        partial_close_fraction=0.50,
-        tp1_stop_offset_r=0.25,
-        trailing_stop_after_tp1=False,
-    ),
-    TradeManagementConfig(
-        name="no_partial_trailing_after_1r",
-        partial_close_fraction=0.0,
-        tp1_stop_offset_r=0.0,
-        trailing_stop_after_tp1=True,
-    ),
+    PARTIAL_50_BE,
+    PARTIAL_30_BE,
+    PARTIAL_50_LOCK_0_25R,
+    NO_PARTIAL_TRAILING_AFTER_1R,
 )
 
 
