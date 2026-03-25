@@ -132,6 +132,8 @@ def test_format_backtest_summary_includes_core_metrics() -> None:
     assert "Trades:" in summary
     assert "Profit factor:" in summary
     assert "Max drawdown:" in summary
+    assert "Partial exits:" in summary
+    assert "Break-even exits:" in summary
     assert "Cooldown events:" in summary
     assert "Daily lockout days:" in summary
     assert "HTF filter enabled:" in summary
@@ -185,10 +187,14 @@ def test_backtest_export_helpers_build_summary_and_trade_rows() -> None:
     assert "cooldown_events" in summary_row
     assert "daily_loss_lockout_days" in summary_row
     assert summary_row["one_open_position_rule"] is True
+    assert "partial_exit_count" in summary_row
+    assert "break_even_exit_count" in summary_row
     assert "scenario_name" in trades_df.columns
     assert "session" in trades_df.columns
     assert "strategy_mode" in trades_df.columns
     assert "transaction_cost" in trades_df.columns
+    assert "partial_exit_taken" in trades_df.columns
+    assert "partial_exit_price" in trades_df.columns
     assert "session" in sessions_df.columns
     assert "strategy_mode" in sessions_df.columns
     assert "profit_factor" in sessions_df.columns
@@ -308,3 +314,124 @@ def test_run_ltf_backtest_cooldown_reduces_reentry_after_losses(monkeypatch) -> 
 
     assert baseline.trade_count > cooled.trade_count
     assert cooled.cooldown_events > 0
+
+
+def test_run_ltf_backtest_supports_partial_tp_then_break_even(monkeypatch) -> None:
+    rows = 203
+    open_ = np.full(rows, 100.0)
+    high = np.full(rows, 100.1)
+    low = np.full(rows, 99.9)
+    close = np.full(rows, 100.0)
+    high[201] = 101.2
+    low[201] = 99.6
+    close[201] = 100.8
+    high[202] = 100.3
+    low[202] = 99.8
+    close[202] = 100.0
+    df = pd.DataFrame(
+        {
+            "open": open_,
+            "high": high,
+            "low": low,
+            "close": close,
+        },
+        index=pd.date_range("2025-01-03 00:00:00", periods=rows, freq="15min"),
+    )
+
+    def fake_decision(*args, **kwargs) -> TradeDecision:
+        return TradeDecision(
+            bias="bullish",
+            tradable=True,
+            strategy_mode="trend_following",
+            session=TradingSession.LONDON,
+            htf_state=None,
+            score=1.0,
+            threshold=0.4,
+            atr_ratio=0.01,
+            reward_to_risk=2.0,
+            atr_multiplier=1.5,
+        )
+
+    def fake_trade_plan(*, side, entry_price, atr_value, account_balance, risk_fraction, atr_multiplier, reward_to_risk):
+        return TradePlan(
+            side=side,
+            entry_price=entry_price,
+            stop_loss=entry_price - 1.0,
+            take_profit_1=entry_price + 1.0,
+            take_profit_2=entry_price + 2.0,
+            stop_distance=1.0,
+            risk_amount=10.0,
+            position_size=10.0,
+            reward_to_risk=reward_to_risk,
+        )
+
+    monkeypatch.setattr("trading_bot.backtest.get_trade_decision", fake_decision)
+    monkeypatch.setattr("trading_bot.backtest.build_trade_plan", fake_trade_plan)
+
+    result = run_ltf_backtest(df, spread=0.0, slippage=0.0)
+
+    assert result.trade_count == 1
+    assert result.partial_exit_count == 1
+    assert result.break_even_exit_count == 1
+    assert result.trades[0].partial_exit_taken is True
+    assert result.trades[0].partial_exit_price == 101.0
+    assert result.trades[0].exit_reason == "break_even"
+    assert result.trades[0].pnl == 5.0
+
+
+def test_run_ltf_backtest_supports_partial_tp_then_final_tp(monkeypatch) -> None:
+    rows = 202
+    open_ = np.full(rows, 100.0)
+    high = np.full(rows, 100.1)
+    low = np.full(rows, 99.9)
+    close = np.full(rows, 100.0)
+    high[201] = 102.5
+    low[201] = 99.6
+    close[201] = 102.0
+    df = pd.DataFrame(
+        {
+            "open": open_,
+            "high": high,
+            "low": low,
+            "close": close,
+        },
+        index=pd.date_range("2025-01-03 00:00:00", periods=rows, freq="15min"),
+    )
+
+    def fake_decision(*args, **kwargs) -> TradeDecision:
+        return TradeDecision(
+            bias="bullish",
+            tradable=True,
+            strategy_mode="trend_following",
+            session=TradingSession.LONDON,
+            htf_state=None,
+            score=1.0,
+            threshold=0.4,
+            atr_ratio=0.01,
+            reward_to_risk=2.0,
+            atr_multiplier=1.5,
+        )
+
+    def fake_trade_plan(*, side, entry_price, atr_value, account_balance, risk_fraction, atr_multiplier, reward_to_risk):
+        return TradePlan(
+            side=side,
+            entry_price=entry_price,
+            stop_loss=entry_price - 1.0,
+            take_profit_1=entry_price + 1.0,
+            take_profit_2=entry_price + 2.0,
+            stop_distance=1.0,
+            risk_amount=10.0,
+            position_size=10.0,
+            reward_to_risk=reward_to_risk,
+        )
+
+    monkeypatch.setattr("trading_bot.backtest.get_trade_decision", fake_decision)
+    monkeypatch.setattr("trading_bot.backtest.build_trade_plan", fake_trade_plan)
+
+    result = run_ltf_backtest(df, spread=0.0, slippage=0.0)
+
+    assert result.trade_count == 1
+    assert result.partial_exit_count == 1
+    assert result.break_even_exit_count == 0
+    assert result.trades[0].exit_reason == "take_profit_after_tp1"
+    assert result.trades[0].pnl == 15.0

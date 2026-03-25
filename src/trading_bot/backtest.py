@@ -30,6 +30,8 @@ class BacktestTrade:
     r_multiple: float
     exit_reason: str
     transaction_cost: float
+    partial_exit_taken: bool = False
+    partial_exit_price: float | None = None
     htf_state: str | None = None
     session: str | None = None
     strategy_mode: str | None = None
@@ -53,6 +55,8 @@ class BacktestResult:
     average_win: float
     average_loss: float
     max_drawdown_pct: float
+    partial_exit_count: int
+    break_even_exit_count: int
     max_daily_loss_fraction: float
     cooldown_bars_after_loss: int
     loss_streak_for_cooldown: int
@@ -69,6 +73,12 @@ class _OpenPosition:
     trade_plan: TradePlan
     entry_time: pd.Timestamp
     risk_amount: float
+    current_stop_loss: float
+    remaining_position_size: float
+    realized_pnl: float = 0.0
+    transaction_cost: float = 0.0
+    partial_exit_taken: bool = False
+    partial_exit_price: float | None = None
     htf_state: str | None = None
     session: str | None = None
     strategy_mode: str | None = None
@@ -88,6 +98,8 @@ class _TradeAggregate:
     profit_factor: float
     average_win: float
     average_loss: float
+    partial_exit_count: int
+    break_even_exit_count: int
 
 
 @dataclass(frozen=True)
@@ -100,6 +112,75 @@ class _RiskRuntimeUpdate:
     cooldown_events: int
 
 
+def _position_pnl(
+    *,
+    side: str,
+    entry_price: float,
+    exit_price: float,
+    position_size: float,
+) -> float:
+    if side == "long":
+        return (exit_price - entry_price) * position_size
+    return (entry_price - exit_price) * position_size
+
+
+def _close_position(
+    position: _OpenPosition,
+    *,
+    exit_price: float,
+    timestamp: pd.Timestamp,
+    exit_reason: str,
+    per_side_cost: float,
+) -> BacktestTrade:
+    gross_pnl = position.realized_pnl + _position_pnl(
+        side=position.trade_plan.side,
+        entry_price=position.trade_plan.entry_price,
+        exit_price=exit_price,
+        position_size=position.remaining_position_size,
+    )
+    transaction_cost = position.transaction_cost + (
+        per_side_cost * position.remaining_position_size
+    )
+    pnl = gross_pnl - transaction_cost
+
+    return BacktestTrade(
+        entry_time=position.entry_time,
+        exit_time=timestamp,
+        side=position.trade_plan.side,
+        entry_price=position.trade_plan.entry_price,
+        exit_price=exit_price,
+        pnl=pnl,
+        r_multiple=pnl / position.risk_amount,
+        exit_reason=exit_reason,
+        transaction_cost=transaction_cost,
+        partial_exit_taken=position.partial_exit_taken,
+        partial_exit_price=position.partial_exit_price,
+        htf_state=position.htf_state,
+        session=position.session,
+        strategy_mode=position.strategy_mode,
+    )
+
+
+def _apply_partial_take_profit(
+    position: _OpenPosition,
+    *,
+    exit_price: float,
+    per_side_cost: float,
+) -> None:
+    partial_size = position.remaining_position_size / 2.0
+    position.realized_pnl += _position_pnl(
+        side=position.trade_plan.side,
+        entry_price=position.trade_plan.entry_price,
+        exit_price=exit_price,
+        position_size=partial_size,
+    )
+    position.transaction_cost += per_side_cost * partial_size
+    position.remaining_position_size -= partial_size
+    position.current_stop_loss = position.trade_plan.entry_price
+    position.partial_exit_taken = True
+    position.partial_exit_price = exit_price
+
+
 def _resolve_exit(
     position: _OpenPosition,
     candle: pd.Series,
@@ -107,66 +188,152 @@ def _resolve_exit(
     timestamp: pd.Timestamp,
     spread: float = 0.0,
     slippage: float = 0.0,
-) -> BacktestTrade | None:
+) -> tuple[_OpenPosition | None, BacktestTrade | None]:
     plan = position.trade_plan
     high = float(candle["high"])
     low = float(candle["low"])
     per_side_cost = (spread / 2.0) + slippage
 
     if plan.side == "long":
-        hit_stop = low <= plan.stop_loss
-        hit_target = high >= plan.take_profit_2
+        hit_stop = low <= position.current_stop_loss
+        hit_tp1 = high >= plan.take_profit_1
+        hit_tp2 = high >= plan.take_profit_2
 
-        if hit_stop and hit_target:
-            exit_price = plan.stop_loss
-            pnl = -position.risk_amount
-            reason = "stop_loss_ambiguous"
-        elif hit_stop:
-            exit_price = plan.stop_loss
-            pnl = -position.risk_amount
-            reason = "stop_loss"
-        elif hit_target:
-            exit_price = plan.take_profit_2
-            pnl = position.risk_amount * plan.reward_to_risk
-            reason = "take_profit"
-        else:
-            return None
+        if not position.partial_exit_taken:
+            if hit_stop and (hit_tp1 or hit_tp2):
+                return None, _close_position(
+                    position,
+                    exit_price=position.current_stop_loss,
+                    timestamp=timestamp,
+                    exit_reason="stop_loss_ambiguous",
+                    per_side_cost=per_side_cost,
+                )
+            if hit_stop:
+                return None, _close_position(
+                    position,
+                    exit_price=position.current_stop_loss,
+                    timestamp=timestamp,
+                    exit_reason="stop_loss",
+                    per_side_cost=per_side_cost,
+                )
+            if hit_tp2:
+                _apply_partial_take_profit(
+                    position,
+                    exit_price=plan.take_profit_1,
+                    per_side_cost=per_side_cost,
+                )
+                return None, _close_position(
+                    position,
+                    exit_price=plan.take_profit_2,
+                    timestamp=timestamp,
+                    exit_reason="take_profit_after_tp1",
+                    per_side_cost=per_side_cost,
+                )
+            if hit_tp1:
+                _apply_partial_take_profit(
+                    position,
+                    exit_price=plan.take_profit_1,
+                    per_side_cost=per_side_cost,
+                )
+                return position, None
+
+        if position.partial_exit_taken:
+            hit_break_even = low <= position.current_stop_loss
+            if hit_break_even and hit_tp2:
+                return None, _close_position(
+                    position,
+                    exit_price=position.current_stop_loss,
+                    timestamp=timestamp,
+                    exit_reason="break_even_ambiguous",
+                    per_side_cost=per_side_cost,
+                )
+            if hit_break_even:
+                return None, _close_position(
+                    position,
+                    exit_price=position.current_stop_loss,
+                    timestamp=timestamp,
+                    exit_reason="break_even",
+                    per_side_cost=per_side_cost,
+                )
+            if hit_tp2:
+                return None, _close_position(
+                    position,
+                    exit_price=plan.take_profit_2,
+                    timestamp=timestamp,
+                    exit_reason="take_profit_after_tp1",
+                    per_side_cost=per_side_cost,
+                )
     else:
-        hit_stop = high >= plan.stop_loss
-        hit_target = low <= plan.take_profit_2
+        hit_stop = high >= position.current_stop_loss
+        hit_tp1 = low <= plan.take_profit_1
+        hit_tp2 = low <= plan.take_profit_2
 
-        if hit_stop and hit_target:
-            exit_price = plan.stop_loss
-            pnl = -position.risk_amount
-            reason = "stop_loss_ambiguous"
-        elif hit_stop:
-            exit_price = plan.stop_loss
-            pnl = -position.risk_amount
-            reason = "stop_loss"
-        elif hit_target:
-            exit_price = plan.take_profit_2
-            pnl = position.risk_amount * plan.reward_to_risk
-            reason = "take_profit"
-        else:
-            return None
+        if not position.partial_exit_taken:
+            if hit_stop and (hit_tp1 or hit_tp2):
+                return None, _close_position(
+                    position,
+                    exit_price=position.current_stop_loss,
+                    timestamp=timestamp,
+                    exit_reason="stop_loss_ambiguous",
+                    per_side_cost=per_side_cost,
+                )
+            if hit_stop:
+                return None, _close_position(
+                    position,
+                    exit_price=position.current_stop_loss,
+                    timestamp=timestamp,
+                    exit_reason="stop_loss",
+                    per_side_cost=per_side_cost,
+                )
+            if hit_tp2:
+                _apply_partial_take_profit(
+                    position,
+                    exit_price=plan.take_profit_1,
+                    per_side_cost=per_side_cost,
+                )
+                return None, _close_position(
+                    position,
+                    exit_price=plan.take_profit_2,
+                    timestamp=timestamp,
+                    exit_reason="take_profit_after_tp1",
+                    per_side_cost=per_side_cost,
+                )
+            if hit_tp1:
+                _apply_partial_take_profit(
+                    position,
+                    exit_price=plan.take_profit_1,
+                    per_side_cost=per_side_cost,
+                )
+                return position, None
 
-    transaction_cost = 2.0 * per_side_cost * plan.position_size
-    pnl -= transaction_cost
+        if position.partial_exit_taken:
+            hit_break_even = high >= position.current_stop_loss
+            if hit_break_even and hit_tp2:
+                return None, _close_position(
+                    position,
+                    exit_price=position.current_stop_loss,
+                    timestamp=timestamp,
+                    exit_reason="break_even_ambiguous",
+                    per_side_cost=per_side_cost,
+                )
+            if hit_break_even:
+                return None, _close_position(
+                    position,
+                    exit_price=position.current_stop_loss,
+                    timestamp=timestamp,
+                    exit_reason="break_even",
+                    per_side_cost=per_side_cost,
+                )
+            if hit_tp2:
+                return None, _close_position(
+                    position,
+                    exit_price=plan.take_profit_2,
+                    timestamp=timestamp,
+                    exit_reason="take_profit_after_tp1",
+                    per_side_cost=per_side_cost,
+                )
 
-    return BacktestTrade(
-        entry_time=position.entry_time,
-        exit_time=timestamp,
-        side=plan.side,
-        entry_price=plan.entry_price,
-        exit_price=exit_price,
-        pnl=pnl,
-        r_multiple=pnl / position.risk_amount,
-        exit_reason=reason,
-        transaction_cost=transaction_cost,
-        htf_state=position.htf_state,
-        session=position.session,
-        strategy_mode=position.strategy_mode,
-    )
+    return position, None
 
 
 def _register_closed_trade(
@@ -231,6 +398,12 @@ def _summarize_trades(trades: list[BacktestTrade]) -> _TradeAggregate:
     win_rate = (win_count / trade_count) if trade_count else 0.0
     gross_profit = sum(trade.pnl for trade in trades if trade.pnl > 0)
     gross_loss = sum(trade.pnl for trade in trades if trade.pnl < 0)
+    partial_exit_count = sum(1 for trade in trades if trade.partial_exit_taken)
+    break_even_exit_count = sum(
+        1
+        for trade in trades
+        if trade.exit_reason in {"break_even", "break_even_ambiguous"}
+    )
     profit_factor = (
         gross_profit / abs(gross_loss)
         if gross_loss < 0
@@ -252,6 +425,8 @@ def _summarize_trades(trades: list[BacktestTrade]) -> _TradeAggregate:
         profit_factor=profit_factor,
         average_win=average_win,
         average_loss=average_loss,
+        partial_exit_count=partial_exit_count,
+        break_even_exit_count=break_even_exit_count,
     )
 
 
@@ -320,6 +495,7 @@ def run_ltf_backtest(
         current_row = feature_frame.iloc[index]
         current_time = feature_frame.index[index]
         current_day_value = current_time.date()
+        closed_trade_this_bar = False
 
         if current_day != current_day_value:
             current_day = current_day_value
@@ -328,7 +504,7 @@ def run_ltf_backtest(
             day_locked = False
 
         if open_position is not None:
-            closed_trade = _resolve_exit(
+            open_position, closed_trade = _resolve_exit(
                 open_position,
                 current_row,
                 timestamp=current_time,
@@ -359,8 +535,11 @@ def run_ltf_backtest(
                 cooldown_until_index = runtime.cooldown_until_index
                 cooldown_events = runtime.cooldown_events
                 open_position = None
+                closed_trade_this_bar = True
 
         if open_position is not None:
+            continue
+        if closed_trade_this_bar:
             continue
         if day_locked:
             continue
@@ -397,12 +576,15 @@ def run_ltf_backtest(
             trade_plan=trade_plan,
             entry_time=current_time,
             risk_amount=trade_plan.risk_amount,
+            current_stop_loss=trade_plan.stop_loss,
+            remaining_position_size=trade_plan.position_size,
+            transaction_cost=((spread / 2.0) + slippage) * trade_plan.position_size,
             htf_state=htf_state,
             session=decision.session.value,
             strategy_mode=decision.strategy_mode,
         )
 
-        closed_trade = _resolve_exit(
+        open_position, closed_trade = _resolve_exit(
             open_position,
             current_row,
             timestamp=current_time,
@@ -437,30 +619,16 @@ def run_ltf_backtest(
     if open_position is not None:
         last_row = feature_frame.iloc[-1]
         last_close = float(last_row["close"])
-        pnl = (
-            (last_close - open_position.trade_plan.entry_price) * open_position.trade_plan.position_size
-            if open_position.trade_plan.side == "long"
-            else (open_position.trade_plan.entry_price - last_close) * open_position.trade_plan.position_size
-        )
-        transaction_cost = 2.0 * ((spread / 2.0) + slippage) * open_position.trade_plan.position_size
-        pnl -= transaction_cost
         trades.append(
-            BacktestTrade(
-                entry_time=open_position.entry_time,
-                exit_time=feature_frame.index[-1],
-                side=open_position.trade_plan.side,
-                entry_price=open_position.trade_plan.entry_price,
+            _close_position(
+                open_position,
                 exit_price=last_close,
-                pnl=pnl,
-                r_multiple=pnl / open_position.risk_amount,
+                timestamp=feature_frame.index[-1],
                 exit_reason="end_of_data",
-                transaction_cost=transaction_cost,
-                htf_state=open_position.htf_state,
-                session=open_position.session,
-                strategy_mode=open_position.strategy_mode,
+                per_side_cost=((spread / 2.0) + slippage),
             )
         )
-        balance += pnl
+        balance += trades[-1].pnl
 
     aggregate = _summarize_trades(trades)
     total_pnl = balance - initial_balance
@@ -493,6 +661,8 @@ def run_ltf_backtest(
         average_win=aggregate.average_win,
         average_loss=aggregate.average_loss,
         max_drawdown_pct=max_drawdown_pct,
+        partial_exit_count=aggregate.partial_exit_count,
+        break_even_exit_count=aggregate.break_even_exit_count,
         max_daily_loss_fraction=max_daily_loss_fraction,
         cooldown_bars_after_loss=cooldown_bars_after_loss,
         loss_streak_for_cooldown=loss_streak_for_cooldown,
@@ -582,6 +752,8 @@ def format_backtest_summary(result: BacktestResult) -> str:
         f"Average win: {result.average_win:.2f}",
         f"Average loss: {result.average_loss:.2f}",
         f"Max drawdown: {result.max_drawdown_pct * 100:.2f}%",
+        f"Partial exits: {result.partial_exit_count}",
+        f"Break-even exits: {result.break_even_exit_count}",
         f"Max daily loss limit: {result.max_daily_loss_fraction * 100:.2f}%",
         f"Cooldown bars after loss streak: {result.cooldown_bars_after_loss}",
         f"Loss streak for cooldown: {result.loss_streak_for_cooldown}",
@@ -624,6 +796,8 @@ def backtest_result_to_row(
         "cooldown_events": result.cooldown_events,
         "daily_loss_lockout_days": result.daily_loss_lockout_days,
         "one_open_position_rule": result.one_open_position_rule,
+        "partial_exit_count": result.partial_exit_count,
+        "break_even_exit_count": result.break_even_exit_count,
         "used_htf_filter": result.used_htf_filter,
         "htf_rule": result.htf_rule,
         "initial_balance": result.initial_balance,
@@ -668,6 +842,8 @@ def backtest_trades_to_frame(
         "r_multiple",
         "exit_reason",
         "transaction_cost",
+        "partial_exit_taken",
+        "partial_exit_price",
         "htf_state",
     ]
     rows: list[dict[str, float | str | None]] = []
@@ -688,6 +864,8 @@ def backtest_trades_to_frame(
                 "r_multiple": trade.r_multiple,
                 "exit_reason": trade.exit_reason,
                 "transaction_cost": trade.transaction_cost,
+                "partial_exit_taken": trade.partial_exit_taken,
+                "partial_exit_price": trade.partial_exit_price,
                 "htf_state": trade.htf_state,
             }
         )
@@ -745,6 +923,8 @@ def backtest_session_stats_to_frame(
                 r_multiple=float(row.r_multiple),
                 exit_reason=str(row.exit_reason),
                 transaction_cost=float(row.transaction_cost),
+                partial_exit_taken=bool(row.partial_exit_taken),
+                partial_exit_price=None if pd.isna(row.partial_exit_price) else float(row.partial_exit_price),
                 htf_state=None if pd.isna(row.htf_state) else str(row.htf_state),
                 session=None if pd.isna(row.session) else str(row.session),
                 strategy_mode=None if pd.isna(row.strategy_mode) else str(row.strategy_mode),
