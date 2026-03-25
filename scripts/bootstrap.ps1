@@ -1,8 +1,8 @@
 param(
-    [string]$Python = "py -3.11"
+    [string]$Python = "py -3.12"
 )
 
-Write-Host "Creating venv with Python 3.11..."
+Write-Host "Creating venv with Python 3.12..."
 Invoke-Expression "$Python -m venv .venv"
 
 Write-Host "Activating venv..."

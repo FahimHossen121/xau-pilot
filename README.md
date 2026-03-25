@@ -1,11 +1,11 @@
-# Trading Bot Template (Python 3.11, MT5, Paper Mode)
+# Trading Bot Template (Python 3.12, MT5, Paper Mode)
 
 This repository is an industry-style starter template for building a trading bot.
 It is intentionally scaffold-only: no real strategy implementation is included yet.
 
 ## Stack
 
-- Python 3.11
+- Python 3.12
 - venv + pip
 - MetaTrader 5 Python integration
 - Paper-trading first workflow
@@ -13,13 +13,13 @@ It is intentionally scaffold-only: no real strategy implementation is included y
 
 ## Quick Start
 
-1. Install Python 3.11.
+1. Install Python 3.12.
 2. Create and activate virtual environment:
 
    Windows PowerShell:
 
    ```powershell
-   py -3.11 -m venv .venv
+   py -3.12 -m venv .venv
    .\.venv\Scripts\Activate.ps1
    ```
 
