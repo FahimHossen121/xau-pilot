@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -16,52 +15,27 @@ from trading_bot.backtest import (
 )
 from trading_bot.config import Settings
 
-
-@dataclass(frozen=True)
-class Scenario:
-    name: str
-    timeframe: str
-    count: int
-    use_htf_filter: bool
-    htf_rule: str | None
-
-
-DEFAULT_SCENARIOS = [
-    Scenario(name="m15_ltf_only", timeframe="M15", count=2000, use_htf_filter=False, htf_rule=None),
-    Scenario(name="m15_htf_4h", timeframe="M15", count=2000, use_htf_filter=True, htf_rule="4H"),
-    Scenario(name="m5_ltf_only", timeframe="M5", count=3000, use_htf_filter=False, htf_rule=None),
-    Scenario(name="m5_htf_1h", timeframe="M5", count=3000, use_htf_filter=True, htf_rule="1H"),
-]
-
-TIMEFRAME_MAP = {
-    "M1": 1,
-    "M5": 5,
-    "M15": 15,
-    "H1": 60,
-    "H4": 240,
-}
-
-
-def _to_mt5_timeframe(label: str) -> int:
-    import MetaTrader5 as mt5
-
-    mapping = {
-        "M1": mt5.TIMEFRAME_M1,
-        "M5": mt5.TIMEFRAME_M5,
-        "M15": mt5.TIMEFRAME_M15,
-        "H1": mt5.TIMEFRAME_H1,
-        "H4": mt5.TIMEFRAME_H4,
-    }
-    return mapping[label]
+SCENARIO_NAME = "xauusd_m5_execution_h1_htf"
+EXECUTION_TIMEFRAME = "M5"
+HTF_RULE = "1H"
+DEFAULT_CANDLE_COUNT = 3000
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run multiple MT5 backtest scenarios and export CSV reports.")
+    parser = argparse.ArgumentParser(
+        description="Run the single active MT5 backtest scenario and export CSV reports."
+    )
     parser.add_argument("--symbol", default=None, help="Trading symbol, default comes from .env")
     parser.add_argument("--balance", type=float, default=1000.0, help="Starting balance for each scenario")
     parser.add_argument("--risk", type=float, default=None, help="Risk fraction override")
     parser.add_argument("--spread", type=float, default=0.30, help="Absolute spread assumption")
     parser.add_argument("--slippage", type=float, default=0.05, help="Absolute slippage assumption per side")
+    parser.add_argument(
+        "--count",
+        type=int,
+        default=DEFAULT_CANDLE_COUNT,
+        help="Number of M5 candles to fetch from MT5",
+    )
     parser.add_argument(
         "--max-daily-loss",
         type=float,
@@ -106,60 +80,62 @@ def main() -> None:
     trade_frames: list[pd.DataFrame] = []
     session_frames: list[pd.DataFrame] = []
 
-    for scenario in DEFAULT_SCENARIOS:
-        result = run_mt5_ltf_backtest(
+    import MetaTrader5 as mt5
+
+    result = run_mt5_ltf_backtest(
+        symbol=symbol,
+        timeframe=mt5.TIMEFRAME_M5,
+        count=args.count,
+        initial_balance=args.balance,
+        risk_fraction=risk_fraction,
+        spread=args.spread,
+        slippage=args.slippage,
+        max_daily_loss_fraction=max_daily_loss_fraction,
+        cooldown_bars_after_loss=args.cooldown_bars,
+        loss_streak_for_cooldown=args.cooldown_loss_streak,
+        use_htf_filter=True,
+        htf_rule=HTF_RULE,
+    )
+    summary_rows.append(
+        backtest_result_to_row(
+            result,
+            scenario_name=SCENARIO_NAME,
             symbol=symbol,
-            timeframe=_to_mt5_timeframe(scenario.timeframe),
-            count=scenario.count,
-            initial_balance=args.balance,
+            timeframe=EXECUTION_TIMEFRAME,
+            candle_count=args.count,
             risk_fraction=risk_fraction,
             spread=args.spread,
             slippage=args.slippage,
-            max_daily_loss_fraction=max_daily_loss_fraction,
-            cooldown_bars_after_loss=args.cooldown_bars,
-            loss_streak_for_cooldown=args.cooldown_loss_streak,
-            use_htf_filter=scenario.use_htf_filter,
-            htf_rule=scenario.htf_rule or "4H",
         )
-        summary_rows.append(
-            backtest_result_to_row(
-                result,
-                scenario_name=scenario.name,
-                symbol=symbol,
-                timeframe=scenario.timeframe,
-                candle_count=scenario.count,
-                risk_fraction=risk_fraction,
-                spread=args.spread,
-                slippage=args.slippage,
-            )
+    )
+    trade_frames.append(
+        backtest_trades_to_frame(
+            result,
+            scenario_name=SCENARIO_NAME,
+            symbol=symbol,
+            timeframe=EXECUTION_TIMEFRAME,
         )
-        trade_frames.append(
-            backtest_trades_to_frame(
-                result,
-                scenario_name=scenario.name,
-                symbol=symbol,
-                timeframe=scenario.timeframe,
-            )
+    )
+    session_frames.append(
+        backtest_session_stats_to_frame(
+            result,
+            scenario_name=SCENARIO_NAME,
+            symbol=symbol,
+            timeframe=EXECUTION_TIMEFRAME,
         )
-        session_frames.append(
-            backtest_session_stats_to_frame(
-                result,
-                scenario_name=scenario.name,
-                symbol=symbol,
-                timeframe=scenario.timeframe,
-            )
-        )
-        print()
-        print(f"[{scenario.name}]")
-        print(format_backtest_summary(result))
+    )
+    print()
+    print(f"[{SCENARIO_NAME}]")
+    print(format_backtest_summary(result))
 
     summary_df = pd.DataFrame(summary_rows)
     trades_df = pd.concat(trade_frames, ignore_index=True) if trade_frames else pd.DataFrame()
     sessions_df = pd.concat(session_frames, ignore_index=True) if session_frames else pd.DataFrame()
 
-    summary_path = output_dir / f"backtest_summary_{timestamp}.csv"
-    trades_path = output_dir / f"backtest_trades_{timestamp}.csv"
-    sessions_path = output_dir / f"backtest_sessions_{timestamp}.csv"
+    stem = f"{symbol.lower()}_{EXECUTION_TIMEFRAME.lower()}_{HTF_RULE.lower()}_{timestamp}"
+    summary_path = output_dir / f"{stem}_summary.csv"
+    trades_path = output_dir / f"{stem}_trades.csv"
+    sessions_path = output_dir / f"{stem}_sessions.csv"
     summary_df.to_csv(summary_path, index=False)
     trades_df.to_csv(trades_path, index=False)
     sessions_df.to_csv(sessions_path, index=False)

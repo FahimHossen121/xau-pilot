@@ -7,29 +7,21 @@ import MetaTrader5 as mt5
 from trading_bot.backtest import format_backtest_summary, run_mt5_ltf_backtest
 from trading_bot.config import Settings
 
-TIMEFRAME_MAP = {
-    "M1": mt5.TIMEFRAME_M1,
-    "M5": mt5.TIMEFRAME_M5,
-    "M15": mt5.TIMEFRAME_M15,
-    "H1": mt5.TIMEFRAME_H1,
-    "H4": mt5.TIMEFRAME_H4,
-}
+EXECUTION_TIMEFRAME = "M5"
+HTF_RULE = "1H"
+DEFAULT_CANDLE_COUNT = 3000
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run a paper-only MT5 backtest.")
-    parser.add_argument("--symbol", default=None, help="Trading symbol, default comes from .env")
-    parser.add_argument(
-        "--timeframe",
-        default="M15",
-        choices=sorted(TIMEFRAME_MAP.keys()),
-        help="MT5 candle timeframe",
+    parser = argparse.ArgumentParser(
+        description="Run the paper-only MT5 backtest for the active strategy: M5 execution with H1 HTF."
     )
+    parser.add_argument("--symbol", default=None, help="Trading symbol, default comes from .env")
     parser.add_argument(
         "--count",
         type=int,
-        default=2000,
-        help="Number of candles to fetch from MT5",
+        default=DEFAULT_CANDLE_COUNT,
+        help="Number of M5 candles to fetch from MT5",
     )
     parser.add_argument(
         "--balance",
@@ -54,16 +46,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.0,
         help="Absolute price slippage assumption per side",
-    )
-    parser.add_argument(
-        "--use-htf-filter",
-        action="store_true",
-        help="Enable higher-timeframe technical regime filtering",
-    )
-    parser.add_argument(
-        "--htf-rule",
-        default="4H",
-        help="Pandas resample rule used to derive higher-timeframe technical states",
     )
     parser.add_argument(
         "--max-daily-loss",
@@ -93,7 +75,7 @@ def main() -> None:
 
     result = run_mt5_ltf_backtest(
         symbol=args.symbol or settings.symbol,
-        timeframe=TIMEFRAME_MAP[args.timeframe],
+        timeframe=mt5.TIMEFRAME_M5,
         count=args.count,
         initial_balance=args.balance,
         risk_fraction=args.risk if args.risk is not None else settings.max_risk_per_trade,
@@ -104,8 +86,8 @@ def main() -> None:
         ),
         cooldown_bars_after_loss=args.cooldown_bars,
         loss_streak_for_cooldown=args.cooldown_loss_streak,
-        use_htf_filter=args.use_htf_filter,
-        htf_rule=args.htf_rule,
+        use_htf_filter=True,
+        htf_rule=HTF_RULE,
     )
     print(format_backtest_summary(result))
 
