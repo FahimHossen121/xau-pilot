@@ -55,6 +55,10 @@ class BacktestResult:
     average_win: float
     average_loss: float
     max_drawdown_pct: float
+    trade_management_name: str
+    partial_close_fraction: float
+    tp1_stop_offset_r: float
+    trailing_stop_after_tp1: bool
     partial_exit_count: int
     break_even_exit_count: int
     max_daily_loss_fraction: float
@@ -77,11 +81,57 @@ class _OpenPosition:
     remaining_position_size: float
     realized_pnl: float = 0.0
     transaction_cost: float = 0.0
+    tp1_reached: bool = False
     partial_exit_taken: bool = False
     partial_exit_price: float | None = None
+    best_price_since_tp1: float | None = None
     htf_state: str | None = None
     session: str | None = None
     strategy_mode: str | None = None
+
+
+@dataclass(frozen=True)
+class TradeManagementConfig:
+    name: str
+    partial_close_fraction: float
+    tp1_stop_offset_r: float
+    trailing_stop_after_tp1: bool
+
+
+DEFAULT_TRADE_MANAGEMENT = TradeManagementConfig(
+    name="partial_50_be",
+    partial_close_fraction=0.50,
+    tp1_stop_offset_r=0.0,
+    trailing_stop_after_tp1=False,
+)
+
+
+TRADE_MANAGEMENT_VARIANTS = (
+    TradeManagementConfig(
+        name="partial_50_be",
+        partial_close_fraction=0.50,
+        tp1_stop_offset_r=0.0,
+        trailing_stop_after_tp1=False,
+    ),
+    TradeManagementConfig(
+        name="partial_30_be",
+        partial_close_fraction=0.30,
+        tp1_stop_offset_r=0.0,
+        trailing_stop_after_tp1=False,
+    ),
+    TradeManagementConfig(
+        name="partial_50_lock_0_25r",
+        partial_close_fraction=0.50,
+        tp1_stop_offset_r=0.25,
+        trailing_stop_after_tp1=False,
+    ),
+    TradeManagementConfig(
+        name="no_partial_trailing_after_1r",
+        partial_close_fraction=0.0,
+        tp1_stop_offset_r=0.0,
+        trailing_stop_after_tp1=True,
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -166,8 +216,10 @@ def _apply_partial_take_profit(
     *,
     exit_price: float,
     per_side_cost: float,
+    partial_close_fraction: float,
+    tp1_stop_offset_r: float,
 ) -> None:
-    partial_size = position.remaining_position_size / 2.0
+    partial_size = position.remaining_position_size * partial_close_fraction
     position.realized_pnl += _position_pnl(
         side=position.trade_plan.side,
         entry_price=position.trade_plan.entry_price,
@@ -176,9 +228,37 @@ def _apply_partial_take_profit(
     )
     position.transaction_cost += per_side_cost * partial_size
     position.remaining_position_size -= partial_size
-    position.current_stop_loss = position.trade_plan.entry_price
+    stop_shift = position.trade_plan.stop_distance * tp1_stop_offset_r
+    if position.trade_plan.side == "long":
+        position.current_stop_loss = position.trade_plan.entry_price + stop_shift
+    else:
+        position.current_stop_loss = position.trade_plan.entry_price - stop_shift
+    position.tp1_reached = True
     position.partial_exit_taken = True
     position.partial_exit_price = exit_price
+    position.best_price_since_tp1 = exit_price
+
+
+def _activate_trailing_stop(position: _OpenPosition) -> None:
+    position.tp1_reached = True
+    position.current_stop_loss = position.trade_plan.entry_price
+    position.best_price_since_tp1 = position.trade_plan.take_profit_1
+
+
+def _update_trailing_stop(position: _OpenPosition, candle: pd.Series) -> None:
+    if not position.tp1_reached:
+        return
+    if position.best_price_since_tp1 is None:
+        return
+
+    if position.trade_plan.side == "long":
+        position.best_price_since_tp1 = max(position.best_price_since_tp1, float(candle["high"]))
+        trailing_stop = position.best_price_since_tp1 - position.trade_plan.stop_distance
+        position.current_stop_loss = max(position.current_stop_loss, trailing_stop)
+    else:
+        position.best_price_since_tp1 = min(position.best_price_since_tp1, float(candle["low"]))
+        trailing_stop = position.best_price_since_tp1 + position.trade_plan.stop_distance
+        position.current_stop_loss = min(position.current_stop_loss, trailing_stop)
 
 
 def _resolve_exit(
@@ -186,6 +266,7 @@ def _resolve_exit(
     candle: pd.Series,
     *,
     timestamp: pd.Timestamp,
+    trade_management: TradeManagementConfig,
     spread: float = 0.0,
     slippage: float = 0.0,
 ) -> tuple[_OpenPosition | None, BacktestTrade | None]:
@@ -199,7 +280,7 @@ def _resolve_exit(
         hit_tp1 = high >= plan.take_profit_1
         hit_tp2 = high >= plan.take_profit_2
 
-        if not position.partial_exit_taken:
+        if not position.tp1_reached:
             if hit_stop and (hit_tp1 or hit_tp2):
                 return None, _close_position(
                     position,
@@ -217,11 +298,16 @@ def _resolve_exit(
                     per_side_cost=per_side_cost,
                 )
             if hit_tp2:
-                _apply_partial_take_profit(
-                    position,
-                    exit_price=plan.take_profit_1,
-                    per_side_cost=per_side_cost,
-                )
+                if trade_management.partial_close_fraction > 0:
+                    _apply_partial_take_profit(
+                        position,
+                        exit_price=plan.take_profit_1,
+                        per_side_cost=per_side_cost,
+                        partial_close_fraction=trade_management.partial_close_fraction,
+                        tp1_stop_offset_r=trade_management.tp1_stop_offset_r,
+                    )
+                elif trade_management.trailing_stop_after_tp1:
+                    _activate_trailing_stop(position)
                 return None, _close_position(
                     position,
                     exit_price=plan.take_profit_2,
@@ -230,14 +316,21 @@ def _resolve_exit(
                     per_side_cost=per_side_cost,
                 )
             if hit_tp1:
-                _apply_partial_take_profit(
-                    position,
-                    exit_price=plan.take_profit_1,
-                    per_side_cost=per_side_cost,
-                )
+                if trade_management.partial_close_fraction > 0:
+                    _apply_partial_take_profit(
+                        position,
+                        exit_price=plan.take_profit_1,
+                        per_side_cost=per_side_cost,
+                        partial_close_fraction=trade_management.partial_close_fraction,
+                        tp1_stop_offset_r=trade_management.tp1_stop_offset_r,
+                    )
+                elif trade_management.trailing_stop_after_tp1:
+                    _activate_trailing_stop(position)
+                else:
+                    position.tp1_reached = True
                 return position, None
 
-        if position.partial_exit_taken:
+        if position.tp1_reached:
             hit_break_even = low <= position.current_stop_loss
             if hit_break_even and hit_tp2:
                 return None, _close_position(
@@ -263,12 +356,14 @@ def _resolve_exit(
                     exit_reason="take_profit_after_tp1",
                     per_side_cost=per_side_cost,
                 )
+            if trade_management.trailing_stop_after_tp1:
+                _update_trailing_stop(position, candle)
     else:
         hit_stop = high >= position.current_stop_loss
         hit_tp1 = low <= plan.take_profit_1
         hit_tp2 = low <= plan.take_profit_2
 
-        if not position.partial_exit_taken:
+        if not position.tp1_reached:
             if hit_stop and (hit_tp1 or hit_tp2):
                 return None, _close_position(
                     position,
@@ -286,11 +381,16 @@ def _resolve_exit(
                     per_side_cost=per_side_cost,
                 )
             if hit_tp2:
-                _apply_partial_take_profit(
-                    position,
-                    exit_price=plan.take_profit_1,
-                    per_side_cost=per_side_cost,
-                )
+                if trade_management.partial_close_fraction > 0:
+                    _apply_partial_take_profit(
+                        position,
+                        exit_price=plan.take_profit_1,
+                        per_side_cost=per_side_cost,
+                        partial_close_fraction=trade_management.partial_close_fraction,
+                        tp1_stop_offset_r=trade_management.tp1_stop_offset_r,
+                    )
+                elif trade_management.trailing_stop_after_tp1:
+                    _activate_trailing_stop(position)
                 return None, _close_position(
                     position,
                     exit_price=plan.take_profit_2,
@@ -299,14 +399,21 @@ def _resolve_exit(
                     per_side_cost=per_side_cost,
                 )
             if hit_tp1:
-                _apply_partial_take_profit(
-                    position,
-                    exit_price=plan.take_profit_1,
-                    per_side_cost=per_side_cost,
-                )
+                if trade_management.partial_close_fraction > 0:
+                    _apply_partial_take_profit(
+                        position,
+                        exit_price=plan.take_profit_1,
+                        per_side_cost=per_side_cost,
+                        partial_close_fraction=trade_management.partial_close_fraction,
+                        tp1_stop_offset_r=trade_management.tp1_stop_offset_r,
+                    )
+                elif trade_management.trailing_stop_after_tp1:
+                    _activate_trailing_stop(position)
+                else:
+                    position.tp1_reached = True
                 return position, None
 
-        if position.partial_exit_taken:
+        if position.tp1_reached:
             hit_break_even = high >= position.current_stop_loss
             if hit_break_even and hit_tp2:
                 return None, _close_position(
@@ -332,6 +439,8 @@ def _resolve_exit(
                     exit_reason="take_profit_after_tp1",
                     per_side_cost=per_side_cost,
                 )
+            if trade_management.trailing_stop_after_tp1:
+                _update_trailing_stop(position, candle)
 
     return position, None
 
@@ -442,6 +551,7 @@ def run_ltf_backtest(
     reward_to_risk: float = 2.0,
     spread: float = 0.0,
     slippage: float = 0.0,
+    trade_management: TradeManagementConfig = DEFAULT_TRADE_MANAGEMENT,
     max_daily_loss_fraction: float = 0.03,
     cooldown_bars_after_loss: int = 3,
     loss_streak_for_cooldown: int = 2,
@@ -457,6 +567,8 @@ def run_ltf_backtest(
         raise ValueError("spread must be non-negative.")
     if slippage < 0:
         raise ValueError("slippage must be non-negative.")
+    if not 0 <= trade_management.partial_close_fraction < 1:
+        raise ValueError("partial_close_fraction must be between 0 and 1.")
     if not 0 < max_daily_loss_fraction <= 1:
         raise ValueError("max_daily_loss_fraction must be between 0 and 1.")
     if cooldown_bars_after_loss < 0:
@@ -508,6 +620,7 @@ def run_ltf_backtest(
                 open_position,
                 current_row,
                 timestamp=current_time,
+                trade_management=trade_management,
                 spread=spread,
                 slippage=slippage,
             )
@@ -588,6 +701,7 @@ def run_ltf_backtest(
             open_position,
             current_row,
             timestamp=current_time,
+            trade_management=trade_management,
             spread=spread,
             slippage=slippage,
         )
@@ -661,6 +775,10 @@ def run_ltf_backtest(
         average_win=aggregate.average_win,
         average_loss=aggregate.average_loss,
         max_drawdown_pct=max_drawdown_pct,
+        trade_management_name=trade_management.name,
+        partial_close_fraction=trade_management.partial_close_fraction,
+        tp1_stop_offset_r=trade_management.tp1_stop_offset_r,
+        trailing_stop_after_tp1=trade_management.trailing_stop_after_tp1,
         partial_exit_count=aggregate.partial_exit_count,
         break_even_exit_count=aggregate.break_even_exit_count,
         max_daily_loss_fraction=max_daily_loss_fraction,
@@ -689,6 +807,7 @@ def run_mt5_ltf_backtest(
     reward_to_risk: float = 2.0,
     spread: float = 0.0,
     slippage: float = 0.0,
+    trade_management: TradeManagementConfig = DEFAULT_TRADE_MANAGEMENT,
     max_daily_loss_fraction: float = 0.03,
     cooldown_bars_after_loss: int = 3,
     loss_streak_for_cooldown: int = 2,
@@ -722,6 +841,7 @@ def run_mt5_ltf_backtest(
         reward_to_risk=reward_to_risk,
         spread=spread,
         slippage=slippage,
+        trade_management=trade_management,
         max_daily_loss_fraction=max_daily_loss_fraction,
         cooldown_bars_after_loss=cooldown_bars_after_loss,
         loss_streak_for_cooldown=loss_streak_for_cooldown,
@@ -752,6 +872,10 @@ def format_backtest_summary(result: BacktestResult) -> str:
         f"Average win: {result.average_win:.2f}",
         f"Average loss: {result.average_loss:.2f}",
         f"Max drawdown: {result.max_drawdown_pct * 100:.2f}%",
+        f"Trade management: {result.trade_management_name}",
+        f"Partial close fraction: {result.partial_close_fraction:.2f}",
+        f"TP1 stop offset R: {result.tp1_stop_offset_r:.2f}",
+        f"Trailing stop after 1R: {result.trailing_stop_after_tp1}",
         f"Partial exits: {result.partial_exit_count}",
         f"Break-even exits: {result.break_even_exit_count}",
         f"Max daily loss limit: {result.max_daily_loss_fraction * 100:.2f}%",
@@ -790,6 +914,10 @@ def backtest_result_to_row(
         "risk_fraction": risk_fraction,
         "spread": spread,
         "slippage": slippage,
+        "trade_management_name": result.trade_management_name,
+        "partial_close_fraction": result.partial_close_fraction,
+        "tp1_stop_offset_r": result.tp1_stop_offset_r,
+        "trailing_stop_after_tp1": result.trailing_stop_after_tp1,
         "max_daily_loss_fraction": result.max_daily_loss_fraction,
         "cooldown_bars_after_loss": result.cooldown_bars_after_loss,
         "loss_streak_for_cooldown": result.loss_streak_for_cooldown,

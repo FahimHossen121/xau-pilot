@@ -7,13 +7,15 @@ from pathlib import Path
 import pandas as pd
 
 from trading_bot.backtest import (
+    TRADE_MANAGEMENT_VARIANTS,
     backtest_result_to_row,
     backtest_session_stats_to_frame,
     backtest_trades_to_frame,
     format_backtest_summary,
-    run_mt5_ltf_backtest,
+    run_ltf_backtest,
 )
 from trading_bot.config import Settings
+from trading_bot.data import get_candles, get_candles_range
 
 SCENARIO_NAME = "xauusd_m5_execution_h1_htf"
 EXECUTION_TIMEFRAME = "M5"
@@ -45,7 +47,7 @@ def _build_report_stem(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run the single active MT5 backtest scenario and export CSV reports."
+        description="Run the active M5/H1 strategy across the supported trade-management variants."
     )
     parser.add_argument("--symbol", default=None, help="Trading symbol, default comes from .env")
     parser.add_argument("--balance", type=float, default=1000.0, help="Starting balance for each scenario")
@@ -118,55 +120,62 @@ def main() -> None:
 
     import MetaTrader5 as mt5
 
-    result = run_mt5_ltf_backtest(
-        symbol=symbol,
-        timeframe=mt5.TIMEFRAME_M5,
-        count=args.count,
-        initial_balance=args.balance,
-        risk_fraction=risk_fraction,
-        spread=args.spread,
-        slippage=args.slippage,
-        max_daily_loss_fraction=max_daily_loss_fraction,
-        cooldown_bars_after_loss=args.cooldown_bars,
-        loss_streak_for_cooldown=args.cooldown_loss_streak,
-        start_time=start_time,
-        end_time=end_time,
-        use_htf_filter=True,
-        htf_rule=HTF_RULE,
+    candles = (
+        get_candles_range(symbol, mt5.TIMEFRAME_M5, start_time, end_time)
+        if start_time is not None and end_time is not None
+        else get_candles(symbol, mt5.TIMEFRAME_M5, args.count)
     )
-    summary_rows.append(
-        backtest_result_to_row(
-            result,
-            scenario_name=SCENARIO_NAME,
-            symbol=symbol,
-            timeframe=EXECUTION_TIMEFRAME,
-            candle_count=args.count if start_time is None else -1,
-            window_start=start_time.isoformat() if start_time is not None else None,
-            window_end=end_time.isoformat() if end_time is not None else None,
+    if len(candles) > 1:
+        candles = candles.iloc[:-1]
+
+    for management in TRADE_MANAGEMENT_VARIANTS:
+        scenario_name = f"{SCENARIO_NAME}_{management.name}"
+        result = run_ltf_backtest(
+            candles,
+            initial_balance=args.balance,
             risk_fraction=risk_fraction,
             spread=args.spread,
             slippage=args.slippage,
+            trade_management=management,
+            max_daily_loss_fraction=max_daily_loss_fraction,
+            cooldown_bars_after_loss=args.cooldown_bars,
+            loss_streak_for_cooldown=args.cooldown_loss_streak,
+            use_htf_filter=True,
+            htf_rule=HTF_RULE,
         )
-    )
-    trade_frames.append(
-        backtest_trades_to_frame(
-            result,
-            scenario_name=SCENARIO_NAME,
-            symbol=symbol,
-            timeframe=EXECUTION_TIMEFRAME,
+        summary_rows.append(
+            backtest_result_to_row(
+                result,
+                scenario_name=scenario_name,
+                symbol=symbol,
+                timeframe=EXECUTION_TIMEFRAME,
+                candle_count=args.count if start_time is None else -1,
+                window_start=start_time.isoformat() if start_time is not None else None,
+                window_end=end_time.isoformat() if end_time is not None else None,
+                risk_fraction=risk_fraction,
+                spread=args.spread,
+                slippage=args.slippage,
+            )
         )
-    )
-    session_frames.append(
-        backtest_session_stats_to_frame(
-            result,
-            scenario_name=SCENARIO_NAME,
-            symbol=symbol,
-            timeframe=EXECUTION_TIMEFRAME,
+        trade_frames.append(
+            backtest_trades_to_frame(
+                result,
+                scenario_name=scenario_name,
+                symbol=symbol,
+                timeframe=EXECUTION_TIMEFRAME,
+            )
         )
-    )
-    print()
-    print(f"[{SCENARIO_NAME}]")
-    print(format_backtest_summary(result))
+        session_frames.append(
+            backtest_session_stats_to_frame(
+                result,
+                scenario_name=scenario_name,
+                symbol=symbol,
+                timeframe=EXECUTION_TIMEFRAME,
+            )
+        )
+        print()
+        print(f"[{scenario_name}]")
+        print(format_backtest_summary(result))
 
     summary_df = pd.DataFrame(summary_rows)
     trades_df = pd.concat(trade_frames, ignore_index=True) if trade_frames else pd.DataFrame()
@@ -174,7 +183,7 @@ def main() -> None:
 
     stem = _build_report_stem(
         symbol=symbol,
-        timeframe=EXECUTION_TIMEFRAME,
+        timeframe=f"{EXECUTION_TIMEFRAME.lower()}_mgmt",
         htf_rule=HTF_RULE,
         timestamp=timestamp,
         start_time=start_time,
