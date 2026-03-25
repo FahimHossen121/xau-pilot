@@ -234,3 +234,23 @@ def test_get_trade_decision_blocks_trade_when_htf_is_volatile() -> None:
 
     assert decision.tradable is False
     assert decision.reason == "htf_volatile"
+
+
+def test_get_trade_decision_blocks_off_hours() -> None:
+    rows = 250
+    close = pd.Series(np.linspace(100.0, 150.0, rows))
+    df = pd.DataFrame(
+        {
+            "open": close - 0.2,
+            "high": close + 0.6,
+            "low": close - 0.6,
+            "close": close,
+        },
+        index=pd.date_range("2025-01-01 18:00:00", periods=rows, freq="15min"),
+    )
+
+    decision = get_trade_decision(df, timestamp=pd.Timestamp("2025-01-02 21:00:00"))
+
+    assert decision.tradable is False
+    assert decision.session is TradingSession.OFF_HOURS
+    assert decision.reason == "off_hours_blocked"

@@ -296,6 +296,21 @@ def get_trade_decision(
     atr_ratio = float(latest["atr_ratio"])
     effective_atr_floor = atr_floor_ratio * profile.atr_floor_multiplier
 
+    if session is TradingSession.OFF_HOURS:
+        return TradeDecision(
+            bias="neutral",
+            tradable=False,
+            strategy_mode="blocked",
+            session=session,
+            htf_state=current_htf_state,
+            score=float(latest["ltf_score"]),
+            threshold=threshold,
+            atr_ratio=atr_ratio,
+            reward_to_risk=profile.reward_to_risk,
+            atr_multiplier=profile.atr_multiplier,
+            reason="off_hours_blocked",
+        )
+
     if current_htf_state == HTFState.VOLATILE.value:
         return TradeDecision(
             bias="neutral",
