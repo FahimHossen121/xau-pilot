@@ -43,6 +43,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Risk fraction per trade, default comes from .env",
     )
+    parser.add_argument(
+        "--spread",
+        type=float,
+        default=0.0,
+        help="Absolute price spread assumption per round trip instrument quote",
+    )
+    parser.add_argument(
+        "--slippage",
+        type=float,
+        default=0.0,
+        help="Absolute price slippage assumption per side",
+    )
     return parser
 
 
@@ -57,6 +69,8 @@ def main() -> None:
         count=args.count,
         initial_balance=args.balance,
         risk_fraction=args.risk if args.risk is not None else settings.max_risk_per_trade,
+        spread=args.spread,
+        slippage=args.slippage,
     )
     print(format_backtest_summary(result))
 

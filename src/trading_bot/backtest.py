@@ -26,6 +26,7 @@ class BacktestTrade:
     pnl: float
     r_multiple: float
     exit_reason: str
+    transaction_cost: float
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,13 @@ class BacktestResult:
     loss_count: int
     win_rate: float
     average_r_multiple: float
+    total_r_multiple: float
+    gross_profit: float
+    gross_loss: float
+    profit_factor: float
+    average_win: float
+    average_loss: float
+    max_drawdown_pct: float
     trades: list[BacktestTrade]
 
 
@@ -54,10 +62,13 @@ def _resolve_exit(
     candle: pd.Series,
     *,
     timestamp: pd.Timestamp,
+    spread: float = 0.0,
+    slippage: float = 0.0,
 ) -> BacktestTrade | None:
     plan = position.trade_plan
     high = float(candle["high"])
     low = float(candle["low"])
+    per_side_cost = (spread / 2.0) + slippage
 
     if plan.side == "long":
         hit_stop = low <= plan.stop_loss
@@ -96,6 +107,9 @@ def _resolve_exit(
         else:
             return None
 
+    transaction_cost = 2.0 * per_side_cost * plan.position_size
+    pnl -= transaction_cost
+
     return BacktestTrade(
         entry_time=position.entry_time,
         exit_time=timestamp,
@@ -105,6 +119,7 @@ def _resolve_exit(
         pnl=pnl,
         r_multiple=pnl / position.risk_amount,
         exit_reason=reason,
+        transaction_cost=transaction_cost,
     )
 
 
@@ -118,11 +133,17 @@ def run_ltf_backtest(
     structure_lookback: int = DEFAULT_STRUCTURE_LOOKBACK,
     atr_multiplier: float = 1.5,
     reward_to_risk: float = 2.0,
+    spread: float = 0.0,
+    slippage: float = 0.0,
     weights: dict[str, float] | None = None,
 ) -> BacktestResult:
     """Replay candles, open on the next bar, and exit on stop or TP2."""
     if initial_balance <= 0:
         raise ValueError("initial_balance must be positive.")
+    if spread < 0:
+        raise ValueError("spread must be non-negative.")
+    if slippage < 0:
+        raise ValueError("slippage must be non-negative.")
 
     feature_frame = add_ltf_features(
         df,
@@ -140,7 +161,13 @@ def run_ltf_backtest(
         current_time = feature_frame.index[index]
 
         if open_position is not None:
-            closed_trade = _resolve_exit(open_position, current_row, timestamp=current_time)
+            closed_trade = _resolve_exit(
+                open_position,
+                current_row,
+                timestamp=current_time,
+                spread=spread,
+                slippage=slippage,
+            )
             if closed_trade is not None:
                 trades.append(closed_trade)
                 balance += closed_trade.pnl
@@ -178,7 +205,13 @@ def run_ltf_backtest(
             risk_amount=trade_plan.risk_amount,
         )
 
-        closed_trade = _resolve_exit(open_position, current_row, timestamp=current_time)
+        closed_trade = _resolve_exit(
+            open_position,
+            current_row,
+            timestamp=current_time,
+            spread=spread,
+            slippage=slippage,
+        )
         if closed_trade is not None:
             trades.append(closed_trade)
             balance += closed_trade.pnl
@@ -192,6 +225,8 @@ def run_ltf_backtest(
             if open_position.trade_plan.side == "long"
             else (open_position.trade_plan.entry_price - last_close) * open_position.trade_plan.position_size
         )
+        transaction_cost = 2.0 * ((spread / 2.0) + slippage) * open_position.trade_plan.position_size
+        pnl -= transaction_cost
         trades.append(
             BacktestTrade(
                 entry_time=open_position.entry_time,
@@ -202,6 +237,7 @@ def run_ltf_backtest(
                 pnl=pnl,
                 r_multiple=pnl / open_position.risk_amount,
                 exit_reason="end_of_data",
+                transaction_cost=transaction_cost,
             )
         )
         balance += pnl
@@ -210,10 +246,29 @@ def run_ltf_backtest(
     win_count = sum(1 for trade in trades if trade.pnl > 0)
     loss_count = sum(1 for trade in trades if trade.pnl < 0)
     total_pnl = balance - initial_balance
-    average_r_multiple = (
-        sum(trade.r_multiple for trade in trades) / trade_count if trade_count else 0.0
-    )
+    total_r_multiple = sum(trade.r_multiple for trade in trades)
+    average_r_multiple = (total_r_multiple / trade_count) if trade_count else 0.0
     win_rate = (win_count / trade_count) if trade_count else 0.0
+    gross_profit = sum(trade.pnl for trade in trades if trade.pnl > 0)
+    gross_loss = sum(trade.pnl for trade in trades if trade.pnl < 0)
+    profit_factor = (
+        gross_profit / abs(gross_loss)
+        if gross_loss < 0
+        else (float("inf") if gross_profit > 0 else 0.0)
+    )
+    average_win = (gross_profit / win_count) if win_count else 0.0
+    average_loss = (gross_loss / loss_count) if loss_count else 0.0
+
+    running_balance = initial_balance
+    peak_balance = initial_balance
+    max_drawdown_pct = 0.0
+    for trade in trades:
+        running_balance += trade.pnl
+        peak_balance = max(peak_balance, running_balance)
+        drawdown_pct = (
+            (peak_balance - running_balance) / peak_balance if peak_balance else 0.0
+        )
+        max_drawdown_pct = max(max_drawdown_pct, drawdown_pct)
 
     return BacktestResult(
         initial_balance=initial_balance,
@@ -225,6 +280,13 @@ def run_ltf_backtest(
         loss_count=loss_count,
         win_rate=win_rate,
         average_r_multiple=average_r_multiple,
+        total_r_multiple=total_r_multiple,
+        gross_profit=gross_profit,
+        gross_loss=gross_loss,
+        profit_factor=profit_factor,
+        average_win=average_win,
+        average_loss=average_loss,
+        max_drawdown_pct=max_drawdown_pct,
         trades=trades,
     )
 
@@ -241,12 +303,18 @@ def run_mt5_ltf_backtest(
     structure_lookback: int = DEFAULT_STRUCTURE_LOOKBACK,
     atr_multiplier: float = 1.5,
     reward_to_risk: float = 2.0,
+    spread: float = 0.0,
+    slippage: float = 0.0,
+    drop_incomplete_last_candle: bool = True,
     weights: dict[str, float] | None = None,
 ) -> BacktestResult:
     """Fetch MT5 candles and run the paper-only LTF replay."""
     from trading_bot.data import get_candles
 
     candles = get_candles(symbol, timeframe, count)
+    if drop_incomplete_last_candle and len(candles) > 1:
+        candles = candles.iloc[:-1]
+
     return run_ltf_backtest(
         candles,
         initial_balance=initial_balance,
@@ -256,6 +324,8 @@ def run_mt5_ltf_backtest(
         structure_lookback=structure_lookback,
         atr_multiplier=atr_multiplier,
         reward_to_risk=reward_to_risk,
+        spread=spread,
+        slippage=slippage,
         weights=weights,
     )
 
@@ -273,5 +343,12 @@ def format_backtest_summary(result: BacktestResult) -> str:
         f"Losses: {result.loss_count}",
         f"Win rate: {result.win_rate * 100:.2f}%",
         f"Average R multiple: {result.average_r_multiple:.2f}",
+        f"Total R multiple: {result.total_r_multiple:.2f}",
+        f"Gross profit: {result.gross_profit:.2f}",
+        f"Gross loss: {result.gross_loss:.2f}",
+        f"Profit factor: {result.profit_factor:.2f}",
+        f"Average win: {result.average_win:.2f}",
+        f"Average loss: {result.average_loss:.2f}",
+        f"Max drawdown: {result.max_drawdown_pct * 100:.2f}%",
     ]
     return "\n".join(lines)
