@@ -96,7 +96,7 @@ class Settings:
             rss_feed_urls=_get_csv_list("RSS_FEED_URLS"),
             brave_api_key=_get_str("BRAVE_API_KEY") or None,
             gemini_api_key=_get_str("GEMINI_API_KEY") or None,
-            gemini_model=_get_str("GEMINI_MODEL", "gemini-1.5-pro"),
+            gemini_model=_get_str("GEMINI_MODEL", "gemini-2.5-flash-lite"),
             ai_htf_refresh_hours=int(_get_float("AI_HTF_REFRESH_HOURS", 1.0)),
             brave_news_freshness=_get_str("BRAVE_NEWS_FRESHNESS", "pd").lower(),
             brave_news_results_per_query=int(_get_float("BRAVE_NEWS_RESULTS_PER_QUERY", 5.0)),

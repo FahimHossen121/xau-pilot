@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
+import time
 from typing import Protocol
 from xml.etree import ElementTree
 
@@ -448,49 +449,74 @@ class GeminiMacroAnalyzer:
             + ("\n".join(article_lines) if article_lines else "- No fresh articles were available.")
         )
 
-        response = httpx.post(
-            f"{self._base_url}/models/{self._model}:generateContent",
-            params={"key": self._api_key},
-            headers={"Content-Type": "application/json"},
-            json={
-                "contents": [
-                    {
-                        "parts": [
-                            {
-                                "text": prompt,
-                            }
-                        ]
-                    }
-                ],
-                "generationConfig": {
-                    "response_mime_type": "application/json",
-                    "response_json_schema": {
-                        "type": "object",
-                        "required": [
-                            "state",
-                            "confidence",
-                            "summary",
-                            "drivers",
-                            "invalidates",
-                            "expires_in_hours",
-                        ],
-                        "properties": {
-                            "state": {
-                                "type": "string",
-                                "enum": [state.value for state in HTFState],
+        response = None
+        for attempt in range(5):
+            response = httpx.post(
+                f"{self._base_url}/models/{self._model}:generateContent",
+                params={"key": self._api_key},
+                headers={"Content-Type": "application/json"},
+                json={
+                    "contents": [
+                        {
+                            "parts": [
+                                {
+                                    "text": prompt,
+                                }
+                            ]
+                        }
+                    ],
+                    "generationConfig": {
+                        "response_mime_type": "application/json",
+                        "response_json_schema": {
+                            "type": "object",
+                            "required": [
+                                "state",
+                                "confidence",
+                                "summary",
+                                "drivers",
+                                "invalidates",
+                                "expires_in_hours",
+                            ],
+                            "properties": {
+                                "state": {
+                                    "type": "string",
+                                    "enum": [state.value for state in HTFState],
+                                },
+                                "confidence": {"type": "number"},
+                                "summary": {"type": "string"},
+                                "drivers": {"type": "array", "items": {"type": "string"}},
+                                "invalidates": {"type": "array", "items": {"type": "string"}},
+                                "expires_in_hours": {"type": "integer"},
                             },
-                            "confidence": {"type": "number"},
-                            "summary": {"type": "string"},
-                            "drivers": {"type": "array", "items": {"type": "string"}},
-                            "invalidates": {"type": "array", "items": {"type": "string"}},
-                            "expires_in_hours": {"type": "integer"},
                         },
                     },
                 },
-            },
-            timeout=self._timeout_seconds,
-        )
-        response.raise_for_status()
+                timeout=self._timeout_seconds,
+            )
+            if response.status_code == 404:
+                raise RuntimeError(
+                    "Gemini model not found. Update GEMINI_MODEL in .env to a currently "
+                    "supported model such as 'gemini-2.5-flash-lite'."
+                )
+            if response.status_code != 429:
+                response.raise_for_status()
+                break
+
+            if attempt == 4:
+                response.raise_for_status()
+
+            retry_after = response.headers.get("Retry-After")
+            if retry_after:
+                try:
+                    delay_seconds = max(1.0, float(retry_after))
+                except ValueError:
+                    delay_seconds = 10.0
+            else:
+                delay_seconds = min(60.0, 10.0 * (attempt + 1))
+            time.sleep(delay_seconds)
+
+        if response is None:
+            raise RuntimeError("Gemini request did not produce a response.")
         payload = response.json()
         candidates = payload.get("candidates", [])
         if not candidates:
@@ -538,6 +564,7 @@ class HTFAIController:
         state: HTFAIControllerState | None = None,
         now: datetime | None = None,
         force_refresh: bool = False,
+        allow_expiry_refresh: bool = True,
     ) -> HTFAIEvaluation:
         current_state = state or HTFAIControllerState()
         now_utc = _ensure_utc(now or technical_snapshot.as_of)
@@ -571,6 +598,7 @@ class HTFAIController:
             technical_snapshot=technical_snapshot,
             now=now_utc,
             force_refresh=force_refresh,
+            allow_expiry_refresh=allow_expiry_refresh,
         )
 
         if trigger_reason == HTFAITrigger.NO_ACTION:
@@ -644,6 +672,7 @@ class HTFAIController:
         technical_snapshot: TechnicalHTFSnapshot,
         now: datetime,
         force_refresh: bool,
+        allow_expiry_refresh: bool,
     ) -> str:
         if force_refresh:
             return HTFAITrigger.STARTUP
@@ -654,7 +683,7 @@ class HTFAIController:
             and technical_snapshot.current_state is not state.last_confirmed_state
         ):
             return HTFAITrigger.TECHNICAL_SHIFT
-        if now >= _ensure_utc(state.ai_expires_at):
+        if allow_expiry_refresh and now >= _ensure_utc(state.ai_expires_at):
             return HTFAITrigger.EXPIRY
         return HTFAITrigger.NO_ACTION
 
