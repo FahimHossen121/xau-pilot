@@ -5,6 +5,7 @@ import pandas as pd
 
 from trading_bot.backtest import run_ltf_backtest
 from trading_bot.htf_ai_replay import (
+    build_technical_seed_ai_history,
     build_effective_htf_series,
     load_ai_state_history,
     project_ai_state_series,
@@ -114,3 +115,35 @@ def test_projected_ai_replay_allows_matching_states() -> None:
     effective = build_effective_htf_series(technical_states=technical_states, ai_states=projected)
 
     assert (effective == HTFState.BULLISH.value).any()
+
+
+def test_build_technical_seed_ai_history_outputs_expected_columns() -> None:
+    rows = 800
+    close = np.linspace(100.0, 180.0, rows)
+    df = pd.DataFrame(
+        {
+            "open": close - 0.5,
+            "high": close + 0.5,
+            "low": close - 0.5,
+            "close": close,
+        },
+        index=pd.date_range("2026-03-01", periods=rows, freq="5min", tz="UTC"),
+    )
+
+    seed_df = build_technical_seed_ai_history(
+        df,
+        start_time="2026-03-02T00:00:00Z",
+        end_time="2026-03-03T00:00:00Z",
+        rule="1H",
+        volatile_atr_ratio=0.05,
+    )
+
+    assert not seed_df.empty
+    assert list(seed_df.columns) == [
+        "timestamp",
+        "state",
+        "confidence",
+        "summary",
+        "seed_source",
+    ]
+    assert seed_df["seed_source"].eq("technical_only").all()
