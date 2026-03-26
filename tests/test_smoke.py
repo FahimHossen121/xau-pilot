@@ -13,6 +13,9 @@ ENV_KEYS = [
     "SYMBOL",
     "MAX_RISK_PER_TRADE",
     "MAX_DAILY_LOSS",
+    "MAX_WEEKLY_LOSS",
+    "MAX_ACCOUNT_DRAWDOWN",
+    "MIN_BALANCE_FRACTION",
     "MT5_LOGIN",
     "MT5_PASSWORD",
     "MT5_SERVER",
@@ -56,6 +59,9 @@ def test_settings_loads_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
                 "SYMBOL=xauusd",
                 "MAX_RISK_PER_TRADE=0.02",
                 "MAX_DAILY_LOSS=0.05",
+                "MAX_WEEKLY_LOSS=0.08",
+                "MAX_ACCOUNT_DRAWDOWN=0.15",
+                "MIN_BALANCE_FRACTION=0.65",
                 "MT5_LOGIN=123456",
                 "MT5_PASSWORD=test-password",
                 "MT5_SERVER=HFMarketsGlobal-Demo",
@@ -81,6 +87,9 @@ def test_settings_loads_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.symbol == "XAUUSD"
     assert settings.max_risk_per_trade == 0.02
     assert settings.max_daily_loss == 0.05
+    assert settings.max_weekly_loss == 0.08
+    assert settings.max_account_drawdown == 0.15
+    assert settings.min_balance_fraction == 0.65
     assert settings.mt5_login == 123456
     assert settings.mt5_server == "HFMarketsGlobal-Demo"
     assert settings.news_provider == "rss"

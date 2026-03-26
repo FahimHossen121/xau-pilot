@@ -68,10 +68,16 @@ class BacktestResult:
     partial_exit_count: int
     break_even_exit_count: int
     max_daily_loss_fraction: float
+    max_weekly_loss_fraction: float
+    max_account_drawdown_fraction: float
+    min_balance_fraction: float
     cooldown_bars_after_loss: int
     loss_streak_for_cooldown: int
     cooldown_events: int
     daily_loss_lockout_days: int
+    weekly_loss_lockout_weeks: int
+    account_drawdown_stop_triggered: bool
+    min_balance_stop_triggered: bool
     one_open_position_rule: bool
     used_htf_filter: bool
     htf_rule: str | None
@@ -169,9 +175,13 @@ class _RiskRuntimeUpdate:
     balance: float
     day_realized_pnl: float
     day_locked: bool
+    week_realized_pnl: float
+    week_locked: bool
     consecutive_losses: int
     cooldown_until_index: int
     cooldown_events: int
+    account_drawdown_stop_triggered: bool
+    min_balance_stop_triggered: bool
 
 
 def _position_pnl(
@@ -466,6 +476,10 @@ def _register_closed_trade(
     day_start_balance: float,
     current_day_value: date,
     lockout_days: set[date],
+    week_realized_pnl: float,
+    week_start_balance: float,
+    current_week_value: tuple[int, int],
+    lockout_weeks: set[tuple[int, int]],
     consecutive_losses: int,
     index: int,
     cooldown_until_index: int,
@@ -473,10 +487,16 @@ def _register_closed_trade(
     loss_streak_for_cooldown: int,
     cooldown_events: int,
     max_daily_loss_fraction: float,
+    max_weekly_loss_fraction: float,
+    peak_balance: float,
+    initial_balance: float,
+    max_account_drawdown_fraction: float,
+    min_balance_fraction: float,
 ) -> _RiskRuntimeUpdate:
     trades.append(closed_trade)
     balance += closed_trade.pnl
     day_realized_pnl += closed_trade.pnl
+    week_realized_pnl += closed_trade.pnl
 
     if closed_trade.pnl < 0:
         consecutive_losses += 1
@@ -494,18 +514,37 @@ def _register_closed_trade(
         consecutive_losses = 0
 
     day_locked = False
+    week_locked = False
     daily_loss_limit = day_start_balance * max_daily_loss_fraction
     if day_realized_pnl <= -daily_loss_limit:
         day_locked = True
         lockout_days.add(current_day_value)
 
+    weekly_loss_limit = week_start_balance * max_weekly_loss_fraction
+    if week_realized_pnl <= -weekly_loss_limit:
+        week_locked = True
+        lockout_weeks.add(current_week_value)
+
+    running_peak_balance = max(peak_balance, balance)
+    current_drawdown = (
+        (running_peak_balance - balance) / running_peak_balance
+        if running_peak_balance
+        else 0.0
+    )
+    account_drawdown_stop_triggered = current_drawdown >= max_account_drawdown_fraction
+    min_balance_stop_triggered = balance <= (initial_balance * min_balance_fraction)
+
     return _RiskRuntimeUpdate(
         balance=balance,
         day_realized_pnl=day_realized_pnl,
         day_locked=day_locked,
+        week_realized_pnl=week_realized_pnl,
+        week_locked=week_locked,
         consecutive_losses=consecutive_losses,
         cooldown_until_index=cooldown_until_index,
         cooldown_events=cooldown_events,
+        account_drawdown_stop_triggered=account_drawdown_stop_triggered,
+        min_balance_stop_triggered=min_balance_stop_triggered,
     )
 
 
@@ -565,6 +604,9 @@ def run_ltf_backtest(
     slippage: float = 0.0,
     trade_management: TradeManagementConfig = DEFAULT_TRADE_MANAGEMENT,
     max_daily_loss_fraction: float = 0.03,
+    max_weekly_loss_fraction: float = 0.05,
+    max_account_drawdown_fraction: float = 0.12,
+    min_balance_fraction: float = 0.70,
     cooldown_bars_after_loss: int = 3,
     loss_streak_for_cooldown: int = 2,
     use_htf_filter: bool = False,
@@ -584,6 +626,12 @@ def run_ltf_backtest(
         raise ValueError("partial_close_fraction must be between 0 and 1.")
     if not 0 < max_daily_loss_fraction <= 1:
         raise ValueError("max_daily_loss_fraction must be between 0 and 1.")
+    if not 0 < max_weekly_loss_fraction <= 1:
+        raise ValueError("max_weekly_loss_fraction must be between 0 and 1.")
+    if not 0 < max_account_drawdown_fraction <= 1:
+        raise ValueError("max_account_drawdown_fraction must be between 0 and 1.")
+    if not 0 < min_balance_fraction <= 1:
+        raise ValueError("min_balance_fraction must be between 0 and 1.")
     if cooldown_bars_after_loss < 0:
         raise ValueError("cooldown_bars_after_loss must be non-negative.")
     if loss_streak_for_cooldown < 1:
@@ -617,18 +665,31 @@ def run_ltf_backtest(
     trades: list[BacktestTrade] = []
     open_position: _OpenPosition | None = None
     current_day: date | None = None
+    current_week: tuple[int, int] | None = None
     day_start_balance = initial_balance
     day_realized_pnl = 0.0
     day_locked = False
+    week_start_balance = initial_balance
+    week_realized_pnl = 0.0
+    week_locked = False
     lockout_days: set[date] = set()
+    lockout_weeks: set[tuple[int, int]] = set()
     consecutive_losses = 0
     cooldown_until_index = -1
     cooldown_events = 0
+    peak_balance_runtime = initial_balance
+    account_drawdown_stop_triggered = False
+    min_balance_stop_triggered = False
     warmup_bars = max(200, structure_lookback)
     for index in range(warmup_bars + 1, len(feature_frame)):
         current_row = feature_frame.iloc[index]
         current_time = feature_frame.index[index]
         current_day_value = current_time.date()
+        current_iso_calendar = current_time.isocalendar()
+        current_week_value = (
+            int(current_iso_calendar.year),
+            int(current_iso_calendar.week),
+        )
         closed_trade_this_bar = False
 
         if current_day != current_day_value:
@@ -636,6 +697,12 @@ def run_ltf_backtest(
             day_start_balance = balance
             day_realized_pnl = 0.0
             day_locked = False
+
+        if current_week != current_week_value:
+            current_week = current_week_value
+            week_start_balance = balance
+            week_realized_pnl = 0.0
+            week_locked = False
 
         if open_position is not None:
             open_position, closed_trade = _resolve_exit(
@@ -655,6 +722,10 @@ def run_ltf_backtest(
                     day_start_balance=day_start_balance,
                     current_day_value=current_day_value,
                     lockout_days=lockout_days,
+                    week_realized_pnl=week_realized_pnl,
+                    week_start_balance=week_start_balance,
+                    current_week_value=current_week_value,
+                    lockout_weeks=lockout_weeks,
                     consecutive_losses=consecutive_losses,
                     index=index,
                     cooldown_until_index=cooldown_until_index,
@@ -662,13 +733,27 @@ def run_ltf_backtest(
                     loss_streak_for_cooldown=loss_streak_for_cooldown,
                     cooldown_events=cooldown_events,
                     max_daily_loss_fraction=max_daily_loss_fraction,
+                    max_weekly_loss_fraction=max_weekly_loss_fraction,
+                    peak_balance=peak_balance_runtime,
+                    initial_balance=initial_balance,
+                    max_account_drawdown_fraction=max_account_drawdown_fraction,
+                    min_balance_fraction=min_balance_fraction,
                 )
                 balance = runtime.balance
                 day_realized_pnl = runtime.day_realized_pnl
                 day_locked = runtime.day_locked
+                week_realized_pnl = runtime.week_realized_pnl
+                week_locked = runtime.week_locked
                 consecutive_losses = runtime.consecutive_losses
                 cooldown_until_index = runtime.cooldown_until_index
                 cooldown_events = runtime.cooldown_events
+                peak_balance_runtime = max(peak_balance_runtime, balance)
+                account_drawdown_stop_triggered = (
+                    account_drawdown_stop_triggered or runtime.account_drawdown_stop_triggered
+                )
+                min_balance_stop_triggered = (
+                    min_balance_stop_triggered or runtime.min_balance_stop_triggered
+                )
                 open_position = None
                 closed_trade_this_bar = True
 
@@ -678,7 +763,11 @@ def run_ltf_backtest(
             continue
         if day_locked:
             continue
+        if week_locked:
+            continue
         if index <= cooldown_until_index:
+            continue
+        if account_drawdown_stop_triggered or min_balance_stop_triggered:
             continue
 
         signal_slice = feature_frame.iloc[:index]
@@ -736,6 +825,10 @@ def run_ltf_backtest(
                 day_start_balance=day_start_balance,
                 current_day_value=current_day_value,
                 lockout_days=lockout_days,
+                week_realized_pnl=week_realized_pnl,
+                week_start_balance=week_start_balance,
+                current_week_value=current_week_value,
+                lockout_weeks=lockout_weeks,
                 consecutive_losses=consecutive_losses,
                 index=index,
                 cooldown_until_index=cooldown_until_index,
@@ -743,13 +836,27 @@ def run_ltf_backtest(
                 loss_streak_for_cooldown=loss_streak_for_cooldown,
                 cooldown_events=cooldown_events,
                 max_daily_loss_fraction=max_daily_loss_fraction,
+                max_weekly_loss_fraction=max_weekly_loss_fraction,
+                peak_balance=peak_balance_runtime,
+                initial_balance=initial_balance,
+                max_account_drawdown_fraction=max_account_drawdown_fraction,
+                min_balance_fraction=min_balance_fraction,
             )
             balance = runtime.balance
             day_realized_pnl = runtime.day_realized_pnl
             day_locked = runtime.day_locked
+            week_realized_pnl = runtime.week_realized_pnl
+            week_locked = runtime.week_locked
             consecutive_losses = runtime.consecutive_losses
             cooldown_until_index = runtime.cooldown_until_index
             cooldown_events = runtime.cooldown_events
+            peak_balance_runtime = max(peak_balance_runtime, balance)
+            account_drawdown_stop_triggered = (
+                account_drawdown_stop_triggered or runtime.account_drawdown_stop_triggered
+            )
+            min_balance_stop_triggered = (
+                min_balance_stop_triggered or runtime.min_balance_stop_triggered
+            )
             open_position = None
 
     if open_position is not None:
@@ -804,10 +911,16 @@ def run_ltf_backtest(
         partial_exit_count=aggregate.partial_exit_count,
         break_even_exit_count=aggregate.break_even_exit_count,
         max_daily_loss_fraction=max_daily_loss_fraction,
+        max_weekly_loss_fraction=max_weekly_loss_fraction,
+        max_account_drawdown_fraction=max_account_drawdown_fraction,
+        min_balance_fraction=min_balance_fraction,
         cooldown_bars_after_loss=cooldown_bars_after_loss,
         loss_streak_for_cooldown=loss_streak_for_cooldown,
         cooldown_events=cooldown_events,
         daily_loss_lockout_days=len(lockout_days),
+        weekly_loss_lockout_weeks=len(lockout_weeks),
+        account_drawdown_stop_triggered=account_drawdown_stop_triggered,
+        min_balance_stop_triggered=min_balance_stop_triggered,
         one_open_position_rule=True,
         used_htf_filter=use_htf_filter,
         htf_rule=htf_rule if use_htf_filter else None,
@@ -833,6 +946,9 @@ def run_mt5_ltf_backtest(
     slippage: float = 0.0,
     trade_management: TradeManagementConfig = DEFAULT_TRADE_MANAGEMENT,
     max_daily_loss_fraction: float = 0.03,
+    max_weekly_loss_fraction: float = 0.05,
+    max_account_drawdown_fraction: float = 0.12,
+    min_balance_fraction: float = 0.70,
     cooldown_bars_after_loss: int = 3,
     loss_streak_for_cooldown: int = 2,
     start_time: datetime | None = None,
@@ -868,6 +984,9 @@ def run_mt5_ltf_backtest(
         slippage=slippage,
         trade_management=trade_management,
         max_daily_loss_fraction=max_daily_loss_fraction,
+        max_weekly_loss_fraction=max_weekly_loss_fraction,
+        max_account_drawdown_fraction=max_account_drawdown_fraction,
+        min_balance_fraction=min_balance_fraction,
         cooldown_bars_after_loss=cooldown_bars_after_loss,
         loss_streak_for_cooldown=loss_streak_for_cooldown,
         use_htf_filter=use_htf_filter,
@@ -905,10 +1024,16 @@ def format_backtest_summary(result: BacktestResult) -> str:
         f"Partial exits: {result.partial_exit_count}",
         f"Break-even exits: {result.break_even_exit_count}",
         f"Max daily loss limit: {result.max_daily_loss_fraction * 100:.2f}%",
+        f"Max weekly loss limit: {result.max_weekly_loss_fraction * 100:.2f}%",
+        f"Max account drawdown limit: {result.max_account_drawdown_fraction * 100:.2f}%",
+        f"Min balance fraction: {result.min_balance_fraction * 100:.2f}%",
         f"Cooldown bars after loss streak: {result.cooldown_bars_after_loss}",
         f"Loss streak for cooldown: {result.loss_streak_for_cooldown}",
         f"Cooldown events: {result.cooldown_events}",
         f"Daily lockout days: {result.daily_loss_lockout_days}",
+        f"Weekly lockout weeks: {result.weekly_loss_lockout_weeks}",
+        f"Account drawdown stop triggered: {result.account_drawdown_stop_triggered}",
+        f"Min balance stop triggered: {result.min_balance_stop_triggered}",
         f"One open position rule: {result.one_open_position_rule}",
         f"HTF filter enabled: {result.used_htf_filter}",
         f"HTF rule: {result.htf_rule or 'none'}",
@@ -947,10 +1072,16 @@ def backtest_result_to_row(
         "tp1_stop_offset_r": result.tp1_stop_offset_r,
         "trailing_stop_after_tp1": result.trailing_stop_after_tp1,
         "max_daily_loss_fraction": result.max_daily_loss_fraction,
+        "max_weekly_loss_fraction": result.max_weekly_loss_fraction,
+        "max_account_drawdown_fraction": result.max_account_drawdown_fraction,
+        "min_balance_fraction": result.min_balance_fraction,
         "cooldown_bars_after_loss": result.cooldown_bars_after_loss,
         "loss_streak_for_cooldown": result.loss_streak_for_cooldown,
         "cooldown_events": result.cooldown_events,
         "daily_loss_lockout_days": result.daily_loss_lockout_days,
+        "weekly_loss_lockout_weeks": result.weekly_loss_lockout_weeks,
+        "account_drawdown_stop_triggered": result.account_drawdown_stop_triggered,
+        "min_balance_stop_triggered": result.min_balance_stop_triggered,
         "one_open_position_rule": result.one_open_position_rule,
         "partial_exit_count": result.partial_exit_count,
         "break_even_exit_count": result.break_even_exit_count,

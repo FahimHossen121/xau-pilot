@@ -55,6 +55,9 @@ class Settings:
     symbol: str
     max_risk_per_trade: float
     max_daily_loss: float
+    max_weekly_loss: float
+    max_account_drawdown: float
+    min_balance_fraction: float
     mt5_login: int | None
     mt5_password: str | None
     mt5_server: str | None
@@ -83,6 +86,9 @@ class Settings:
             symbol=_get_str("SYMBOL", "XAUUSD").upper(),
             max_risk_per_trade=_get_float("MAX_RISK_PER_TRADE", 0.01),
             max_daily_loss=_get_float("MAX_DAILY_LOSS", 0.03),
+            max_weekly_loss=_get_float("MAX_WEEKLY_LOSS", 0.05),
+            max_account_drawdown=_get_float("MAX_ACCOUNT_DRAWDOWN", 0.12),
+            min_balance_fraction=_get_float("MIN_BALANCE_FRACTION", 0.70),
             mt5_login=_get_optional_int("MT5_LOGIN"),
             mt5_password=_get_str("MT5_PASSWORD") or None,
             mt5_server=_get_str("MT5_SERVER") or None,
@@ -108,6 +114,15 @@ class Settings:
 
         if not 0 < self.max_daily_loss <= 1:
             raise ValueError("MAX_DAILY_LOSS must be between 0 and 1.")
+
+        if not 0 < self.max_weekly_loss <= 1:
+            raise ValueError("MAX_WEEKLY_LOSS must be between 0 and 1.")
+
+        if not 0 < self.max_account_drawdown <= 1:
+            raise ValueError("MAX_ACCOUNT_DRAWDOWN must be between 0 and 1.")
+
+        if not 0 < self.min_balance_fraction <= 1:
+            raise ValueError("MIN_BALANCE_FRACTION must be between 0 and 1.")
 
         if self.ai_htf_refresh_hours < 1:
             raise ValueError("AI_HTF_REFRESH_HOURS must be at least 1.")

@@ -61,6 +61,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Daily realized loss fraction that blocks new trades for the rest of the day",
     )
     parser.add_argument(
+        "--max-weekly-loss",
+        type=float,
+        default=None,
+        help="Weekly realized loss fraction that blocks new trades for the rest of the week",
+    )
+    parser.add_argument(
+        "--max-account-drawdown",
+        type=float,
+        default=None,
+        help="Account drawdown fraction from peak equity that stops new trades",
+    )
+    parser.add_argument(
+        "--min-balance-fraction",
+        type=float,
+        default=None,
+        help="Minimum fraction of starting balance below which new trades stop",
+    )
+    parser.add_argument(
         "--cooldown-bars",
         type=int,
         default=3,
@@ -109,6 +127,19 @@ def main() -> None:
         slippage=args.slippage,
         max_daily_loss_fraction=(
             args.max_daily_loss if args.max_daily_loss is not None else settings.max_daily_loss
+        ),
+        max_weekly_loss_fraction=(
+            args.max_weekly_loss if args.max_weekly_loss is not None else settings.max_weekly_loss
+        ),
+        max_account_drawdown_fraction=(
+            args.max_account_drawdown
+            if args.max_account_drawdown is not None
+            else settings.max_account_drawdown
+        ),
+        min_balance_fraction=(
+            args.min_balance_fraction
+            if args.min_balance_fraction is not None
+            else settings.min_balance_fraction
         ),
         cooldown_bars_after_loss=args.cooldown_bars,
         loss_streak_for_cooldown=args.cooldown_loss_streak,
